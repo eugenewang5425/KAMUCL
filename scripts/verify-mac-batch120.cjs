@@ -47,6 +47,13 @@ async function bindRenderer(evaluate,observe,waitFor=wait,budgetMs=10000,started
  }
  throw Error('Unique actual production renderer did not become ready within '+budgetMs+' ms; original window inventory retained')
 }
+function createBatchNavigation({click,until,foreground,evaluate}){
+ return async id=>{
+  const component=coordinates.ROUTE_COMPONENTS[id];assert(component,'Unknown native QA route')
+  if(['mods','packs','shaders','recordings','projections','bridge','servers'].includes(id)&&await evaluate("document.querySelector('[data-nav=resources]')?.getAttribute('aria-expanded')!=='true'"))await click('[data-nav=resources]')
+  await click(`[data-nav=${id}]`);await until('actual route '+id,`window.__macParityObserver.route(${JSON.stringify(component)}).component`,value=>value===component);await foreground()
+ }
+}
 async function run(){
  assert.equal(process.platform,'darwin');assert.equal(process.env.GITHUB_ACTIONS,'true','Only an owned disposable Mac runner is authorized')
  const [argument,arch,stage='app',packageSourceArgument]=process.argv.slice(2),app=fs.realpathSync.native(argument),pkg=require('../package.json')
@@ -97,7 +104,7 @@ async function run(){
    const coordinate=coordinates.createParityCoordinate({call,evaluate,native:observedNative,wait,identity:row.identity,documentBinding:()=>row.documentBinding,proof:row,save})
    const backdropCoordinate=coordinates.createParityCoordinate({call,evaluate,native:observedNative,wait,identity:row.identity,documentBinding:()=>row.documentBinding,proof:row,save,pointerDismissal:true,geometry:{...require('./qa-coordinate-geometry114.cjs'),coordinateExpression:backdropExpression,waitForStableCoordinate:waitForBackdrop}})
    const click=(selector,options)=>coordinate(selector,options)
-   const nav=async id=>{await click(`[data-nav=${id}]`);const component=coordinates.ROUTE_COMPONENTS[id];assert(component,'Unknown native QA route');await until('actual route '+id,`window.__macParityObserver.route(${JSON.stringify(component)}).component`,value=>value===component);await foreground()}
+   const nav=createBatchNavigation({click,until,foreground,evaluate})
    const screenshot=async label=>{
     await foreground();const prefix=theme+'-'+label,pageFile=prefix+'-page.png',nativeFile=prefix+'-native.png'
     const bytes=Buffer.from((await call('Page.captureScreenshot',{format:'png'})).data,'base64');fs.writeFileSync(path.join(output,pageFile),bytes,{flag:'wx'})
@@ -143,4 +150,4 @@ async function run(){
  proof.complete=proof.rows.length===4&&proof.rows.every(row=>row.complete)&&!proof.errors.length;proof.finishedAt=new Date().toISOString();save();assert.equal(proof.complete,true,JSON.stringify(proof.errors));console.log(JSON.stringify({complete:true,output,arch,stage,sourceCommit}))
 }
 if(require.main===module)run().catch(error=>{console.error(error);process.exitCode=1})
-module.exports={connect,port,bindRenderer,DOWNLOAD_BUTTON,DOWNLOAD_MASK,backdropExpression,backdropReady}
+module.exports={connect,port,bindRenderer,createBatchNavigation,DOWNLOAD_BUTTON,DOWNLOAD_MASK,backdropExpression,backdropReady}

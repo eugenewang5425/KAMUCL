@@ -50,7 +50,8 @@ function retainCurrent({out,target,before,startedAt,endedAt=Date.now()}){
    assert.equal(path.resolve(value.directory),directory,'Current UUID ledger must identify its own directory')
    const row={directory:name,binding:matching[0],files:[]};result.modules.push(row)
    for(const file of fs.readdirSync(directory))if(/^(?:live|failure|summary)\.json$/.test(file)||/^[a-zA-Z0-9_-]+\.png$/.test(file))row.files.push(copy(path.join(directory,file),path.join(target,'current-modules',name,file)))
-   for(const receipt of value.macNativeRawReceipts??[]){assert(/^native-action-\d+-(?:request|stdout)\.json$|^native-action-\d+-(?:stdout|stderr)-error\.log$/.test(receipt.file),'Only explicit original native action receipts may be collected');const retained=copy(path.join(directory,receipt.file),path.join(target,'current-modules',name,receipt.file));assert.equal(retained.bytes,receipt.bytes);assert.equal(retained.sha256,receipt.sha256);row.files.push(retained)}
+   const namespace=value.macNativeAdapter?.receiptNamespace
+   for(const receipt of value.macNativeRawReceipts??[]){assert(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(namespace),'Native receipts must identify their exact bridge UUID');assert(receipt.file.startsWith('native-action-'+namespace+'-')&&/^native-action-[0-9a-f-]{36}-\d+-(?:request|stdout)\.json$|^native-action-[0-9a-f-]{36}-\d+-(?:stdout|stderr)-error\.log$/.test(receipt.file),'Only explicit original native action receipts may be collected');const retained=copy(path.join(directory,receipt.file),path.join(target,'current-modules',name,receipt.file));assert.equal(retained.bytes,receipt.bytes);assert.equal(retained.sha256,receipt.sha256);row.files.push(retained)}
    // Do not copy the compiled helper, its temporary root or profile data.
   }catch(error){result.errors.push({file:name,name:error.name,message:error.message})}
  }
