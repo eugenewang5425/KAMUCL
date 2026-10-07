@@ -266,14 +266,16 @@ function collectLibraries(vj: VersionJson): LibEntry[] {
     const lib = nativeLibraryForHost(source)
     if (lib.downloads?.artifact) {
       push(lib.downloads.artifact, false, mavenIdentity(lib.name), lib.nativeChecksumUrl)
-    } else if (lib.name && lib.url) {
+    } else if (!lib.downloads?.classifiers && lib.name && lib.url) {
       // Fabric/Quilt 等 profile 的 maven 坐标形式：无内联 downloads，需按仓库基址拼接
       const rel = mavenPath(lib.name)
       if (rel) {
         const base = lib.url.endsWith('/') ? lib.url : lib.url + '/'
         push({ path: rel, url: base + rel }, false, mavenIdentity(lib.name))
       }
-    } else if (lib.name) {
+    } else if (!lib.downloads?.classifiers && lib.name) {
+      // Mojang 的 classifiers-only 库明确没有普通 artifact；不能推断一个
+      // 不存在的 base JAR，否则安装成功后仍会在启动校验时缺少下载地址。
       // forge 安装器注入库（fmlcore/javafmllanguage/mclanguage/lowcodelanguage 等）：
       // json 仅给 maven 坐标，本地有则直接收编，缺失按组织推断 maven 源下载
       const rel = mavenPath(lib.name)
