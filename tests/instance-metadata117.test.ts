@@ -14,7 +14,7 @@ import type { VersionJson } from '../src/main/core/versions'
 
 const fabric = [{ name: 'net.fabricmc:fabric-loader:0.19.5' }, { name: 'net.fabricmc:intermediary:0.0.0' }]
 function temporary(t: { after: (fn: () => void) => void }) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kamucl-metadata117-'))
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'kamucl-metadata117-')))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   return root
 }

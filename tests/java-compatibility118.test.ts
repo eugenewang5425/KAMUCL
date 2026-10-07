@@ -210,7 +210,10 @@ test('118 actual instance diagnostics use verified client JAR evidence for renam
   const sha1 = crypto.createHash('sha1').update(bytes).digest('hex')
   Object.assign(profile, { downloads: { client: { sha1 } } })
   const target = { folder: root, id: profile.id }
-  const fixture = { root, file, profile, target, java: [java(17), java(25)] }
+  const architecture = process.arch === 'arm64' ? 'arm64' : 'x64'
+  const nativeJava = [java(17), java(25)].map(candidate => ({ ...candidate, architecture }))
+  const foreignJava = { ...java(17), path: java(17).path + '-foreign', architecture: architecture === 'arm64' ? 'x64' : 'arm64' }
+  const fixture = { root, file, profile, target, java: [foreignJava, ...nativeJava] }
   ;(globalThis as any).__javaDiagnostics118 = fixture
   t.after(async () => { delete (globalThis as any).__javaDiagnostics118; await fs.rm(root, { recursive: true, force: true }) })
   const javaFile = JSON.stringify(path.resolve('src/main/core/java.ts').replace(/\\/g, '/'))
@@ -242,6 +245,7 @@ test('118 actual instance diagnostics use verified client JAR evidence for renam
   const result = await module.exports.diagnoseInstance(target)
   assert.equal(result.requiredJava, 17)
   assert.deepEqual(result.java.map((j: any) => j.major), [17])
+  assert.equal(result.java[0].architecture, architecture, 'diagnostics must reject a runtime for a different CPU architecture')
   assert(!result.findings.some((f: any) => f.rule === 'java-requirement' || f.rule === 'java-unavailable'))
   assert.equal(profile.javaVersion.majorVersion, 25, 'diagnostics must not rewrite a copied profile')
 })

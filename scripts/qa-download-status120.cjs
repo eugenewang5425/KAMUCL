@@ -48,9 +48,18 @@ async function connect(p, main) {
         await focus(); for (const [type, buttons] of [['mouseMoved', 0], ['mousePressed', 1], ['mouseReleased', 0]]) await r.call('Input.dispatchMouseEvent', { type, ...point, button: type === 'mouseMoved' ? 'none' : 'left', buttons, clickCount: type === 'mouseMoved' ? 0 : 1 }); await sleep(100); await focus()
       }
       await ready("document.querySelector('.dl-toggle') && document.querySelector('.viewer3d canvas') && document.documentElement.dataset.theme === " + JSON.stringify(theme))
+      // Renderer readiness precedes the portable wrapper's native fade. Observe
+      // its real terminal marker; never hide feedback or infer completion from
+      // a fixed delay, or native screenshots may still contain its face layer.
+      const boot = await m.evaluate("(()=>{const fs=process.mainModule.require('node:fs'),signal=process.env.KAMUCL_BOOT_SIGNAL;if(!signal)throw Error('Portable startup signal is absent');return {signal,visible:fs.existsSync(signal+'.visible')?fs.readFileSync(signal+'.visible','utf8'):null}})()")
+      rowBootWait: for (let i = 0; i <= 100; i++) {
+        boot.finished = await m.evaluate(`(()=>{const fs=process.mainModule.require('node:fs'),file=${JSON.stringify(boot.signal + '.finished')};return fs.existsSync(file)?fs.readFileSync(file,'utf8'):null})()`)
+        if (boot.finished === 'done') { boot.observedAt = Date.now(); break rowBootWait }
+        assert(i < 100, 'Native portable startup feedback did not finish'); await sleep(200)
+      }
       await r.call('Emulation.setFocusEmulationEnabled', { enabled: false })
       await m.evaluate(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
-      const row = { theme, binding, actualProcessExeSHA256: hash(binding.exe), layouts: [], ownedLedger: track.ledger }; proof.rows.push(row); save()
+      const row = { theme, binding, boot, actualProcessExeSHA256: hash(binding.exe), layouts: [], ownedLedger: track.ledger }; proof.rows.push(row); save()
       let open = false
       for (const [width, height, zoom] of [[960, 620, 1], [960, 620, 1.25], [1280, 900, 1.25]]) {
         await m.evaluate(`(()=>{const w=testElectron.BrowserWindow.fromId(${binding.windowId});w.unmaximize();w.setSize(${width},${height});w.webContents.setZoomFactor(${zoom});return true})()`); await sleep(300); await focus()
