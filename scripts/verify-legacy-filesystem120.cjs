@@ -19,9 +19,15 @@ async function main() {
     platform: process.platform, arch: process.arch, node: process.version, startedAt: new Date().toISOString(),
     sourceSha256: crypto.createHash('sha256').update(fs.readFileSync('src/main/core/legacyForgeInstaller.ts')).digest('hex'),
     tmpdir, temporaryBase, rawRoot, canonicalRoot: root, ancestors: [], status: 'running' };
-  fs.mkdirSync(path.dirname(output), { recursive: true });
-  let api;
+  let api, failure;
+  const recordFailure = (stage, error) => {
+    const detail = { stage, message: error.message, stack: error.stack };
+    proof.status = 'failed';
+    (proof.failures ||= []).push(detail);
+    if (!failure) { failure = error; proof.error = detail; }
+  };
   try {
+    fs.mkdirSync(path.dirname(output), { recursive: true });
     for (let current = rawRoot; ; current = path.dirname(current)) {
       const stat = fs.lstatSync(current);
       proof.ancestors.push({ path: current, symbolicLink: stat.isSymbolicLink(), uid: stat.uid,
@@ -65,15 +71,25 @@ async function main() {
     } finally { prepared.dispose(); }
     assert(!fs.readdirSync(libraries).some(name => name.startsWith('.kamucl-legacy-forge-')));
     proof.userRootLinkRejected = true; proof.status = 'passed';
-  } catch (error) { proof.status = 'failed'; proof.error = { message: error.message, stack: error.stack }; throw error; }
+  } catch (error) { recordFailure('preflight', error); }
   finally {
-    await api?.closeHttpClient();
-    const relative = path.relative(temporaryBase, root);
-    assert(relative.startsWith(prefix) && relative === path.basename(root) && !path.isAbsolute(relative));
-    assert.equal(path.dirname(root), temporaryBase); assert.equal(fs.realpathSync.native(root), root);
-    fs.rmSync(root, { recursive: true, force: true });
-    proof.ownedRootRemoved = !fs.existsSync(root); proof.finishedAt = new Date().toISOString();
-    fs.writeFileSync(output, JSON.stringify(proof, null, 2) + '\n');
+    try { await api?.closeHttpClient(); }
+    catch (error) { recordFailure('closeHttpClient', error); }
+    proof.ownedRootRemoved = false;
+    try {
+      const relative = path.relative(temporaryBase, root);
+      assert(relative.startsWith(prefix) && relative === path.basename(root) && !path.isAbsolute(relative));
+      assert.equal(path.dirname(root), temporaryBase); assert.equal(fs.realpathSync.native(root), root);
+      fs.rmSync(root, { recursive: true, force: true });
+      proof.ownedRootRemoved = !fs.existsSync(root);
+    } catch (error) { recordFailure('cleanup', error); }
+    proof.finishedAt = new Date().toISOString();
+    try { fs.writeFileSync(output, JSON.stringify(proof, null, 2) + '\n'); }
+    catch (error) { recordFailure('receipt', error); }
+  }
+  if (failure) {
+    if (proof.failures.length > 1) console.error(JSON.stringify({ preflightFailures: proof.failures }));
+    throw failure;
   }
   console.log(`${proof.status}: ${output}`);
 }
