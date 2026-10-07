@@ -128,6 +128,29 @@ test('MC百科 explicit linked identity remains usable when the original Chinese
   assert.deepEqual(a.items.map(r => r.projectId), ['actual-linked']); assert(a.warnings?.some(w => w.includes('原中文关键词查询失败')))
 })
 
+test('all-source pagination retries a partial Chinese count after service recovery instead of caching failure or losing its warning', async t => {
+  let recovered = false
+  const requests: URL[] = []
+  const runtime = await fixture(t, async input => {
+    const url = new URL(String(input)); requests.push(url)
+    if (!url.pathname.startsWith('/v2')) return new Response('synthetic source outage', { status: 503 })
+    const keyword = url.searchParams.get('query')
+    if (keyword === '钠' && !recovered) return new Response('synthetic original query outage', { status: 503 })
+    const hits = keyword === '钠' ? [{ project_id: 'domestic', slug: 'domestic', title: '中文钠项目' }]
+      : [{ project_id: 'sodium', slug: 'sodium', title: 'Sodium' }]
+    return Response.json({ hits, total_hits: hits.length })
+  })
+  const q: CommunityQuery = { ...query, keyword: '钠', source: 'all', loader: 'fabric', limit: 1 }
+  const first = await runtime.communitySearchPage(q)
+  assert.equal(first.total, 1); assert.deepEqual(first.items.map(item => item.slug), ['sodium'])
+  assert(first.warnings?.some(warning => warning.includes('原中文关键词查询失败')))
+  recovered = true
+  const index = requests.length, second = await runtime.communitySearchPage({ ...q, offset: 1 })
+  assert.equal(second.total, 2); assert.deepEqual(second.items.map(item => item.slug), ['sodium'])
+  assert(!second.warnings?.some(warning => warning.includes('原中文关键词查询失败')))
+  assert(requests.slice(index).some(url => url.pathname.startsWith('/v2') && url.searchParams.get('query') === '钠'), 'Recovered Chinese metadata must be queried, rather than a cached partial count')
+})
+
 test('known local alias with a different repository slug falls back to explicit MC百科 source identity, never a search first-hit', async t => {
   const runtime = await fixture(t, async input => {
     const u = new URL(String(input))

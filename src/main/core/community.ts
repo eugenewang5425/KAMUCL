@@ -475,7 +475,10 @@ export async function communitySearchPage(input: CommunityQuery): Promise<Commun
     const page = await providerSearch(source, { ...q, source, offset: 0, limit: 1 })
     warnings.push(...(page.warnings ?? []))
     if (sourceCounts.size > 100) sourceCounts.clear()
-    sourceCounts.set(key, { total: page.total, time: Date.now() })
+    // A warning can describe only part of a Chinese lookup succeeding. Do not
+    // freeze that partial total (or lose its warning) on subsequent pages.
+    // Healthy alias/encyclopedia catalogs remain shared by providerSearch.
+    if (!page.warnings?.length) sourceCounts.set(key, { total: page.total, time: Date.now() })
     return page.total
   }))
   if (counts.every(r => r.status === 'rejected')) throw (counts[0] as PromiseRejectedResult).reason
