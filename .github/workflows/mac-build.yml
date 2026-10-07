@@ -42,7 +42,21 @@ jobs:
           distribution: temurin
           java-version: '17'
       - run: npm ci
-      - run: npm test
+      - name: Verify actual temporary-root aliases and legacy installation paths
+        run: node scripts/verify-legacy-filesystem120.cjs out/legacy-forge120-native-preflight.json
+      - name: Run complete tests and retain original output
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee out/mac120-npm-test.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-filesystem-tests-${{ matrix.arch }}
+          path: |
+            out/legacy-forge120-native-preflight.json
+            out/mac120-npm-test.log
+          if-no-files-found: error
       - run: npx tsc --noEmit
       - run: npm run license:check
       - run: node scripts/build-bridge.cjs

@@ -62,9 +62,14 @@ async function harness(root: string, local?: string, forbidJava = false) {
   }
 }
 async function fixture(run: (root: string) => Promise<void>) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kamucl-legacy-forge120 中文 '))
+  const temporaryBase = fs.realpathSync.native(os.tmpdir()), prefix = 'kamucl-legacy-forge120 中文 '
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(temporaryBase, prefix)))
+  assert.equal(fs.realpathSync.native(root), root)
   try { await run(root) } finally {
-    assert(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep + 'kamucl-legacy-forge120 '))
+    const relative = path.relative(temporaryBase, root)
+    assert(relative.startsWith(prefix) && relative === path.basename(root) && !path.isAbsolute(relative))
+    assert.equal(path.dirname(root), temporaryBase)
+    assert.equal(fs.realpathSync.native(root), root)
     fs.rmSync(root, { recursive: true, force: true })
   }
 }
