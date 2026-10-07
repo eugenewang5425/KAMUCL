@@ -6,6 +6,24 @@ const owned=require('./qa-owned-process-119.cjs'),coordinates=require('./verify-
 const {readMacPackageIdentity}=require('./mac-package-identity.cjs')
 const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))
+const DOWNLOAD_BUTTON='[data-ui="App:50549c4d6612"][title="下载中心"]',DOWNLOAD_MASK='[data-ui="App:32e6a4482be2"]'
+// The backdrop centre is covered by the panel at the minimum 125% layout.
+// This QA-only adapter observes a fixed fractional point in the real backdrop;
+// the original bounds, native state and trusted target ledger remain unchanged.
+function backdropExpression(selector,options){return require('./qa-coordinate-geometry114.cjs').coordinateExpression(selector,options).replace('x=r.x+r.width/2,y=r.y+r.height/2','x=r.x+r.width*.05,y=r.y+r.height*.9')}
+function backdropReady(row,previous,expected){
+ const finite=Number.isFinite,rect=r=>r&&['x','y','width','height'].every(k=>finite(r[k]))&&r.width>0&&r.height>0
+ const ready=value=>{const n=value?.native,c=value?.coordinate,r=c?.renderer;return n&&c&&r&&['pid','windowId','webContentsId'].every(k=>Number.isInteger(expected[k])&&expected[k]>0&&n[k]===expected[k])&&n.visible===true&&n.minimized===false&&n.focused===true&&n.appHidden===false&&rect(n.bounds)&&rect(n.contentBounds)&&finite(n.zoom)&&n.zoom>0&&(expected.zoom===undefined||n.zoom===expected.zoom)&&r.width===Math.round(n.contentBounds.width/n.zoom)&&r.height===Math.round(n.contentBounds.height/n.zoom)&&r.hasFocus===true&&r.hidden===false&&r.ready==='complete'&&finite(r.pixelRatio)&&r.pixelRatio>0&&r.timeOrigin===expected.timeOrigin&&r.url===expected.url&&c.hit===true&&c.ancestorsVisible===true&&c.runningAnimations===0&&c.absent===true&&rect(c.bounds)&&finite(c.x)&&finite(c.y)&&c.x===c.bounds.x+c.bounds.width*.05&&c.y===c.bounds.y+c.bounds.height*.9&&c.bounds.x>=0&&c.bounds.y>=0&&c.bounds.x+c.bounds.width<=r.width&&c.bounds.y+c.bounds.height<=r.height}
+ if(!ready(row)||!ready(previous))return false
+ return row.native.zoom===previous.native.zoom&&['x','y','width','height'].every(k=>['bounds','contentBounds'].every(name=>row.native[name][k]===previous.native[name][k])&&row.coordinate.bounds[k]===previous.coordinate.bounds[k])&&row.coordinate.x===previous.coordinate.x&&row.coordinate.y===previous.coordinate.y&&['width','height','pixelRatio','timeOrigin','url'].every(k=>row.coordinate.renderer[k]===previous.coordinate.renderer[k])
+}
+async function waitForBackdrop({read,expected,deadline,now=()=>performance.now(),wait:pause=wait,pollMs=75,onSample=()=>{}}){
+ let previous,last
+ while(now()<deadline){let timer,value;try{value=await Promise.race([Promise.resolve().then(()=>read(deadline-now())),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Original backdrop coordinate deadline elapsed during read')),Math.max(1,deadline-now()))})])}catch(error){value={observationError:{name:error.name,message:error.message}}}finally{clearTimeout(timer)}
+  const at=now();last=value;onSample({at,value});if(at<deadline&&backdropReady(value,previous,expected))return value;previous=value;const left=deadline-now();if(left<=0)break;await pause(Math.min(pollMs,left))
+ }
+ const error=Error('Original coordinate deadline elapsed before two stable owned backdrop observations');error.code='QA_COORDINATE_DEADLINE';error.last=last;throw error
+}
 async function port(){const server=net.createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const value=server.address().port;await new Promise(resolve=>server.close(resolve));return value}
 async function connect(port,isMain){
  let page
@@ -19,15 +37,27 @@ async function connect(port,isMain){
  const evaluate=async(expression,timeoutMs)=>{const result=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true},timeoutMs);assert(!result.exceptionDetails,JSON.stringify(result.exceptionDetails));return result.result.value}
  return{ws,call,evaluate}
 }
+async function bindRenderer(evaluate,observe,waitFor=wait,budgetMs=10000){
+ const deadline=Date.now()+budgetMs
+ while(Date.now()<deadline){
+  const state=await evaluate("(()=>{globalThis.testElectron=process.mainModule.require('electron');const windows=testElectron.BrowserWindow.getAllWindows().filter(w=>!w.isDestroyed());const matching=windows.filter(w=>w.webContents.getURL().includes('/renderer/index.html'));return{appReady:testElectron.app.isReady(),windows:windows.map(w=>{const url=w.webContents.getURL();return{windowId:w.id,webContentsId:w.webContents.id,url,visible:w.isVisible(),opacity:w.getOpacity(),role:url.includes('/renderer/index.html')?'main-renderer':url.includes('/renderer/splash.html')?'startup-splash':url?'other':'uncommitted'}}),matches:matching.length,binding:matching.length===1?{pid:process.pid,windowId:matching[0].id,webContentsId:matching[0].webContents.id,profile:testElectron.app.getPath('userData'),executable:process.execPath,version:testElectron.app.getVersion(),arch:process.arch}:null}})()")
+  observe({at:Date.now(),...state});assert(state.matches<=1,'More than one actual production renderer exists')
+  if(state.appReady&&state.matches===1&&state.windows.some(w=>w.role==='main-renderer'&&w.visible&&w.opacity>=.999)&&!state.windows.some(w=>w.role==='startup-splash'))return state.binding
+  await waitFor(80)
+ }
+ throw Error('Unique actual production renderer did not become ready within '+budgetMs+' ms; original window inventory retained')
+}
 async function run(){
  assert.equal(process.platform,'darwin');assert.equal(process.env.GITHUB_ACTIONS,'true','Only an owned disposable Mac runner is authorized')
- const [argument,arch,stage='app']=process.argv.slice(2),app=fs.realpathSync.native(argument),pkg=require('../package.json')
+ const [argument,arch,stage='app',packageSourceArgument]=process.argv.slice(2),app=fs.realpathSync.native(argument),pkg=require('../package.json')
  assert.equal(process.arch,arch);assert.equal(arch,'arm64');assert(['app','dmg'].includes(stage))
- const sourceCommit=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),exe=path.join(app,'Contents/MacOS/KAMUCL')
+ const qaSourceCommit=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),sourceCommit=packageSourceArgument?.replace(/^--package-source-commit=/,'')||qaSourceCommit,exe=path.join(app,'Contents/MacOS/KAMUCL')
+ if(packageSourceArgument)assert(packageSourceArgument.startsWith('--package-source-commit='),'Unknown QA source option')
+ const sourceComparison=packageSourceArgument?require('./verify-mac-batch120-reuse.cjs').proveReuseSource(sourceCommit,qaSourceCommit):{mode:'identical source',artifactSourceCommit:sourceCommit,qaSourceCommit}
  const identity=readMacPackageIdentity(app,{version:pkg.version,arch,sourceCommit,runtimeVersion:pkg.devDependencies.electron,minimumSystemVersion:'13.0.0'})
  const output=path.resolve(`release/mac-batch120-proof-${arch}-${stage}`);fs.mkdirSync(output,{recursive:true});assert(!fs.existsSync(path.join(output,'proof.json')),'Do not replace an earlier attempt')
  const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'KAMUCL Mac 120 中文 ')))
- const proof={version:pkg.version,arch,stage,sourceCommit,packageIdentity:identity,executable:exe,executableSHA256:hash(exe),startedAt:new Date().toISOString(),complete:false,classification:'Actual signed packaged native Mac foreground, production renderer/IPC and trusted coordinate UI. Download status events are synthetic visual replays. Community metadata fixtures and actual service interactions are separately classified by the community helper; no original user archives are read or uploaded.',rows:[],errors:[]}
+ const proof={version:pkg.version,arch,stage,sourceCommit,artifactSourceCommit:sourceCommit,qaSourceCommit,sourceComparison,packageIdentity:identity,executable:exe,executableSHA256:hash(exe),startedAt:new Date().toISOString(),complete:false,classification:'Actual signed packaged native Mac foreground, production renderer/IPC and trusted coordinate UI. Artifact and QA commits are recorded separately. Download status events are synthetic visual replays. Community metadata fixtures and actual service interactions are separately classified by the community helper; no original user archives are read or uploaded.',rows:[],errors:[]}
  const save=()=>fs.writeFileSync(path.join(output,'proof.json'),JSON.stringify(proof,null,2))
  save()
  const probe=path.join(output,'native-window-probe'),probeSource=path.resolve('scripts/mac-material-fixture.swift')
@@ -46,7 +76,8 @@ async function run(){
   let renderer,main
   try{
    renderer=await connect(rendererPort,false);main=await connect(mainPort,true)
-   const binding=await main.evaluate("(()=>{globalThis.testElectron=process.mainModule.require('electron');const windows=testElectron.BrowserWindow.getAllWindows().filter(w=>w.webContents.getURL().includes('/renderer/index.html'));if(windows.length!==1)throw Error('Expected one actual owned renderer');const w=windows[0];return {pid:process.pid,windowId:w.id,webContentsId:w.webContents.id,profile:testElectron.app.getPath('userData'),executable:process.execPath,version:testElectron.app.getVersion(),arch:process.arch}})()")
+   row.bindingSamples=[]
+   const binding=await bindRenderer(main.evaluate,sample=>{row.bindingSamples.push(sample);save()})
    assert.equal(binding.pid,track.pid);assert.equal(binding.arch,arch);assert.equal(binding.version,pkg.version);assert.equal(fs.realpathSync.native(binding.profile),profile);assert.equal(fs.realpathSync.native(binding.executable),fs.realpathSync.native(exe));row.binding=binding;row.actualExecutableSHA256=hash(binding.executable);assert.equal(row.actualExecutableSHA256,proof.executableSHA256)
    const observedNative=async()=>{
     const state=await main.evaluate(`(()=>{const w=testElectron.BrowserWindow.fromId(${binding.windowId});if(!w||w.webContents.id!==${binding.webContentsId})throw Error('Owned window changed');return{pid:process.pid,windowId:w.id,webContentsId:w.webContents.id,bounds:w.getBounds(),contentBounds:w.getContentBounds(),zoom:w.webContents.getZoomFactor(),focused:w.isFocused(),visible:w.isVisible(),minimized:w.isMinimized(),appHidden:testElectron.app.isHidden()}})()`)
@@ -62,6 +93,7 @@ async function run(){
    row.identity={pid:binding.pid,windowId:binding.windowId,webContentsId:binding.webContentsId};row.documentBinding=await evaluate('({timeOrigin:performance.timeOrigin,url:location.href})')
    const foreground=async()=>{const actual=await observedNative();assert(actual.visible&&actual.focused&&!actual.minimized&&!actual.appHidden);return actual}
    const coordinate=coordinates.createParityCoordinate({call,evaluate,native:observedNative,wait,identity:row.identity,documentBinding:()=>row.documentBinding,proof:row,save})
+   const backdropCoordinate=coordinates.createParityCoordinate({call,evaluate,native:observedNative,wait,identity:row.identity,documentBinding:()=>row.documentBinding,proof:row,save,geometry:{...require('./qa-coordinate-geometry114.cjs'),coordinateExpression:backdropExpression,waitForStableCoordinate:waitForBackdrop}})
    const click=(selector,options)=>coordinate(selector,options)
    const nav=async id=>{await click(`[data-nav=${id}]`);const component=coordinates.ROUTE_COMPONENTS[id];assert(component,'Unknown native QA route');await until('actual route '+id,`window.__macParityObserver.route(${JSON.stringify(component)}).component`,value=>value===component);await foreground()}
    const screenshot=async label=>{
@@ -79,14 +111,18 @@ async function run(){
     for(const[state,text]of Object.entries(texts)){
      const event={taskId:`mac-ui120-${theme}-${width}-${zoom}`,taskTitle:'导入整合包 · 合成界面验收',stage:'assets',text,progress:.999,overall:.86,parallelStages:[{id:'assets',label:'资源文件',state:'running',progress:.999,text}]}
      await main.evaluate(`testElectron.BrowserWindow.fromId(${binding.windowId}).webContents.send('event:progress',${JSON.stringify(event)});true`)
-     if(!opened||!await evaluate("!!document.querySelector('.dl-panel')")){await click('.dl-toggle');opened=true}
+     if(!opened||!await evaluate("!!document.querySelector('.dl-panel')")){await click(DOWNLOAD_BUTTON);opened=true}
      await until('actual production task receiver text',`document.querySelector('.dl-stage-detail')?.innerText`,value=>value===text)
      const geometry=await evaluate("(()=>{const e=document.querySelector('.dl-stage-detail'),p=document.querySelector('.dl-panel'),b=e.getBoundingClientRect(),r=p.getBoundingClientRect();return{text:e.innerText,scrollWidth:e.scrollWidth,clientWidth:e.clientWidth,whiteSpace:getComputedStyle(e).whiteSpace,bodyOverflow:document.documentElement.scrollWidth>innerWidth,panel:r.toJSON(),detail:b.toJSON(),viewport:{width:innerWidth,height:innerHeight}}})()")
      assert.equal(geometry.whiteSpace,'normal');assert(geometry.scrollWidth<=geometry.clientWidth+1);assert(!geometry.bodyOverflow);assert(geometry.detail.y>=geometry.panel.y&&geometry.detail.bottom<=Math.min(geometry.panel.bottom,geometry.viewport.height)+1)
      layout.states.push({state,geometry,screenshot:await screenshot(`${width}-${zoom}-${state}`)});save()
     }
     await main.evaluate(`testElectron.BrowserWindow.fromId(${binding.windowId}).webContents.send('event:installDone',{taskId:${JSON.stringify(`mac-ui120-${theme}-${width}-${zoom}`)},ok:false,error:'下载源限流，可稍后重试：资源文件 minecraft/sounds/fixture120/test.ogg',stage:'assets'});true`)
-    await until('actual task failure dismissal',"!!document.querySelector('.dl-error')");await click('.dl-error .dl-dismiss');await click('.dl-toggle');opened=false
+    await until('actual task failure dismissal',"!!document.querySelector('.dl-error')");await click('.dl-error .dl-dismiss')
+    if(await evaluate("!!document.querySelector('.dl-panel')"))await backdropCoordinate(DOWNLOAD_MASK)
+    await until('actual download panel closed',"!document.querySelector('.dl-panel')");opened=false
+    if(await evaluate("!!document.querySelector('.toast-close')"))await click('.toast-close')
+    await until('actual previous terminal toast gone',"!document.querySelector('.toast-close')")
    }
    row.downloadStatus={complete:true,classification:'Synthetic ProgressEvent/terminal messages sent through actual production webContents.send and renderer receiver. Trusted UI interactions and actual window screenshots. No download, rate-limited service or user original failure attribution.'};save()
    const h={root,profile,game,games:game,theme,version:pkg.version,output,call,evaluate,main:main.evaluate,click,nav,wait,until,screenshot,foreground,ownedTrack:track,binding}
@@ -103,4 +139,4 @@ async function run(){
  proof.complete=proof.rows.length===4&&proof.rows.every(row=>row.complete)&&!proof.errors.length;proof.finishedAt=new Date().toISOString();save();assert.equal(proof.complete,true,JSON.stringify(proof.errors));console.log(JSON.stringify({complete:true,output,arch,stage,sourceCommit}))
 }
 if(require.main===module)run().catch(error=>{console.error(error);process.exitCode=1})
-module.exports={connect,port}
+module.exports={connect,port,bindRenderer,DOWNLOAD_BUTTON,DOWNLOAD_MASK,backdropExpression,backdropReady}

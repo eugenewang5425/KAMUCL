@@ -1,0 +1,38 @@
+const test=require('node:test'),assert=require('node:assert/strict')
+const {SOURCE,ASSETS,validateQaPaths,proveReuseSource,verifyManifest}=require('./verify-mac-batch120-reuse.cjs'),{bindRenderer,DOWNLOAD_BUTTON,DOWNLOAD_MASK,backdropExpression,backdropReady}=require('./verify-mac-batch120.cjs')
+const qa='a'.repeat(40)
+function executor({paths='',dirty='',head=qa}={}){return(_file,args)=>args[0]==='rev-parse'?head:args[0]==='status'?dirty:args[0]==='diff'?paths:assert.fail('Unexpected git action')}
+test('QA-only comparison accepts exact declared QA files and records distinct original/QA sources',()=>{
+ const result=proveReuseSource(SOURCE,qa,{execute:executor({paths:'scripts/verify-mac-batch120.cjs\0scripts/qa-download-status120.cjs\0'})});assert.equal(result.artifactSourceCommit,SOURCE);assert.equal(result.qaSourceCommit,qa);assert.equal(result.changedPaths.length,2)
+})
+test('any production, version, runtime, renderer, native or unrelated QA path rejects reuse',()=>{
+ for(const file of ['src/main/core/download.ts','src/renderer/src/App.vue','native/game.swift','package.json','package-lock.json','electron.vite.config.ts','.github/workflows/mac-build.yml','docs/other.md'])assert.throws(()=>validateQaPaths([file]),/forbidden path/)
+ assert.throws(()=>validateQaPaths(['scripts/verify-mac-batch120.cjs','scripts/verify-mac-batch120.cjs']),/Duplicate/)
+})
+test('dirty tracked checkout, a changed QA HEAD or another artifact source rejects before native execution',()=>{
+ assert.throws(()=>proveReuseSource(SOURCE,qa,{execute:executor({dirty:' M src/main/index.ts'})}),/Tracked checkout/)
+ assert.throws(()=>proveReuseSource(SOURCE,qa,{execute:executor({head:'b'.repeat(40)})}),/QA HEAD/)
+ assert.throws(()=>proveReuseSource('b'.repeat(40),qa,{execute:executor()}))
+})
+function originalManifest(){const identity={schemaVersion:1,product:'KAMUCL',platform:'darwin',version:'1.1.20',arch:'arm64',sourceCommit:SOURCE,runtimeVersion:'44.3.0',minimumSystemVersion:'13.0.0',appAsarSHA256:'17d4d9e40785dd588e34a1c0be9bb27f8b675e4a939eb5bd9083e3dd7ab0ec81',signing:'ad-hoc; not Developer ID or notarized'};return{version:'1.1.20',arch:'arm64',commit:SOURCE,runtimeVersion:'44.3.0',frameworkVersion:'44.3.0',minimum:'13.0.0',signing:'ad-hoc; not Developer ID or notarized',packageIntegrity:true,nativeAcceptance:'separate required native APP/DMG/game/tools/update jobs',appAsarSHA256:identity.appAsarSHA256,buildIdentity:identity,buildIdentitySHA256:'6f047dad4873d1eb34a94c36123a07b02cf532c9a3b7c7685dc14f629ad8c325',assets:ASSETS}}
+test('original native package manifest preserves exact raw SHA, source, runtime, ABI and ZIP/DMG hashes',()=>{const original=originalManifest();assert.deepEqual(verifyManifest(Buffer.from(JSON.stringify(original,null,2))),original)})
+test('semantically similar or modified manifest cannot authorize altered/rebuilt artifacts',()=>{
+ const value=originalManifest();assert.throws(()=>verifyManifest(Buffer.from(JSON.stringify(value))),/manifest SHA/)
+ value.assets=[{...value.assets[0],sha256:'0'.repeat(64)},value.assets[1]];assert.throws(()=>verifyManifest(Buffer.from(JSON.stringify(value,null,2))),/manifest SHA/)
+})
+test('actual QA binding waits for committed URL and captures original uncommitted inventory',async()=>{
+ const rows=[];let next=0;const expected={pid:12,windowId:13,webContentsId:14};assert.deepEqual(await bindRenderer(async()=>++next===1?{appReady:true,windows:[{windowId:13,url:'',role:'uncommitted',opacity:0}],matches:0,binding:null}:{appReady:true,windows:[{windowId:13,url:'file:///owned/renderer/index.html',role:'main-renderer',visible:true,opacity:1}],matches:1,binding:expected},row=>rows.push(row),async()=>{}),expected);assert.equal(rows.length,2);assert.equal(rows[0].windows[0].role,'uncommitted')
+})
+test('native batch binding observes natural visibility and splash removal before a focus request',async()=>{
+ const rows=[],binding={pid:12},main={role:'main-renderer',visible:true,opacity:1};let next=0
+ assert.equal(await bindRenderer(async()=>({appReady:true,matches:1,binding,windows:++next===1?[{...main,visible:false}]:next===2?[main,{role:'startup-splash',visible:true,opacity:1}]:[main]}),row=>rows.push(row),async()=>{}),binding);assert.equal(rows.length,3)
+})
+test('download QA addresses semantic home button and observes the uncovered real backdrop point',()=>{
+ assert.equal(DOWNLOAD_BUTTON,'[data-ui="App:50549c4d6612"][title="下载中心"]');assert.equal(DOWNLOAD_MASK,'[data-ui="App:32e6a4482be2"]');assert(backdropExpression(DOWNLOAD_MASK).includes('x=r.x+r.width*.05,y=r.y+r.height*.9'))
+ const expected={pid:1,windowId:2,webContentsId:3,timeOrigin:10,url:'file:///renderer/index.html'},row={native:{...expected,visible:true,minimized:false,focused:true,appHidden:false,bounds:{x:0,y:0,width:960,height:620},contentBounds:{x:0,y:0,width:960,height:600},zoom:1.25},coordinate:{hit:true,x:768*.05,y:480*.9,bounds:{x:0,y:0,width:768,height:480},ancestorsVisible:true,runningAnimations:0,absent:true,renderer:{width:768,height:480,hasFocus:true,hidden:false,ready:'complete',pixelRatio:2,timeOrigin:10,url:expected.url}}}
+ assert.equal(backdropReady(row,row,expected),true);assert.equal(backdropReady({...row,coordinate:{...row.coordinate,hit:false}},row,expected),false);assert.equal(backdropReady({...row,coordinate:{...row.coordinate,x:384,y:240}},row,expected),false)
+})
+test('duplicate renderer fails immediately; absent renderer rejects within unchanged bounded readiness',async()=>{
+ let waits=0;await assert.rejects(bindRenderer(async()=>({appReady:true,windows:[],matches:2}),()=>{},async()=>{waits++}),/More than one/);assert.equal(waits,0)
+ await assert.rejects(bindRenderer(async()=>({appReady:true,windows:[],matches:0}),()=>{},async()=>new Promise(resolve=>setTimeout(resolve,3)),5),/did not become ready/)
+})
