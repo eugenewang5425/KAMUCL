@@ -12,6 +12,7 @@ import { lookupMcmod, mcmodNameRank, parseMcmodSearch } from '../src/main/core/m
 import { initialCommunityQuery, initialCommunityVersionSelection, chooseCommunityInstance } from '../src/renderer/src/communityVersionSelection'
 import { versionInstallHarness } from './helpers/version-install-harness'
 import type { CommunityQuery, InstalledVersion } from '../src/shared/types'
+import { instanceKey } from '../src/shared/modCompatibility'
 
 const target: InstalledVersion = { id: 'named-instance', folder: 'fixture/registered', mcVersion: '1.20.1', loader: 'fabric' }
 const query: CommunityQuery = { keyword: '悠然一派', kind: 'mod', source: 'modrinth', mcVersion: '1.20.1', loader: 'forge', offset: 0, limit: 20 }
@@ -299,13 +300,13 @@ test('known local alias with a different repository slug falls back to explicit 
 async function mountedCommunity() {
   const descriptor = parse(fs.readFileSync('src/renderer/src/views/CommunityView.vue', 'utf8')).descriptor
   const script = compileScript(descriptor, { id: 'community-120-real-setup' }).content
-  const requests: Array<{ query: any; resolve: (v: any) => void }> = [], fileRequests: any[] = [], state: any = {}
-  const fixture = { state, store: reactive({ installed: [target], settings: { theme: 'black-orange' }, searchKeyword: '' }), selected: ref(target), requests, fileRequests }
+  const requests: Array<{ query: any; resolve: (v: any) => void }> = [], fileRequests: any[] = [], downloads: any[] = [], state: any = {}
+  const fixture = { state, store: reactive({ installed: [target], settings: { theme: 'black-orange' }, searchKeyword: '' }), selected: ref(target), requests, fileRequests, downloads }
   const code = (await build({ stdin: { contents: script, loader: 'ts', resolveDir: path.resolve('src/renderer/src/views') }, bundle: true, write: false, platform: 'node', format: 'cjs', packages: 'external', logLevel: 'silent', plugins: [{ name: 'scoped-community-transport-and-child-host-fixtures', setup(b) {
     b.onResolve({ filter: /\.vue$/ }, () => ({ path: 'child-host', namespace: 'fixture' }))
     b.onResolve({ filter: /^\.\.\/(api|store|modFavorites)$/ }, args => ({ path: args.path.split('/').at(-1)!, namespace: 'fixture' }))
     b.onResolve({ filter: /^@shared\// }, args => ({ path: path.resolve('src/shared', args.path.slice('@shared/'.length) + '.ts') }))
-    b.onLoad({ filter: /.*/, namespace: 'fixture' }, args => ({ loader: 'ts', contents: args.path === 'api' ? `const f=globalThis.fixture; export const communitySearch=q=>new Promise(resolve=>f.requests.push({query:{...q},resolve})); export const communityFiles=(...a)=>{f.fileRequests.push(a);return Promise.resolve([])}; export const getManifest=()=>Promise.resolve([{id:'1.21.1',type:'release'},{id:'1.20.1',type:'release'}]); export const getModTargets=()=>Promise.resolve({versions:f.store.installed,errors:[]}); export const errText=e=>String(e); export const communityDownload=()=>Promise.reject('not an install test');`
+    b.onLoad({ filter: /.*/, namespace: 'fixture' }, args => ({ loader: 'ts', contents: args.path === 'api' ? `const f=globalThis.fixture; export const communitySearch=q=>new Promise(resolve=>f.requests.push({query:{...q},resolve})); export const communityFiles=(...a)=>{f.fileRequests.push(a);return Promise.resolve([])}; export const getManifest=()=>Promise.resolve([{id:'1.21.1',type:'release'},{id:'1.20.1',type:'release'}]); export const getModTargets=()=>Promise.resolve({versions:f.store.installed,errors:[]}); export const errText=e=>String(e); export const communityDownload=(file,target)=>{f.downloads.push({file,target});return Promise.resolve('synthetic IPC result, no downloaded file')};`
       : args.path === 'store' ? `const f=globalThis.fixture; export const store=f.store,selectedInstance=f.selected;export const toast=()=>{};export const displayVersionName=v=>v.id;`
       : args.path === 'modFavorites' ? `export const favorites=[],favoriteBusy=new Set(); export const loadFavorites=async()=>{};export const toggleProject=()=>{};`
       : 'export default {}' }))
@@ -349,4 +350,39 @@ test('actual compiled community ignores old response after a new exact version q
   assert.deepEqual(s.results.value, []); assert.equal(s.query.mcVersion, '26.3')
   s.onSearch(); const late = h.requests.at(-1)!; app.unmount(); late.resolve({ items: [{ title: 'late after unmount' }], total: 1, offset: 0, limit: 20 }); await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(s.results.value, [])
+})
+
+test('actual compiled resource download keeps the exact folder for same-named targets and leaves launcher and browse selection unchanged', async () => {
+  const h = await mountedCommunity(), app = await h.mount(), s = h.fixture.state.current
+  await h.resolveLast()
+  const second = { ...target, folder: 'fixture/other-registered-folder' }
+  h.fixture.store.installed.push(second)
+  const selected = h.fixture.selected.value, originalQuery = { ...s.query }
+  const file = { source: 'modrinth', projectId: 'synthetic', fileId: 'resource-file', fileName: 'resource.zip', url: 'https://fixture.invalid/resource.zip', gameVersions: ['1.20.1'], loaders: [] }
+  s.modal.open = true; s.modal.kind = 'resourcepack'; s.modal.files = [file]; s.modal.fileId = file.fileId
+  s.modal.loadingFiles = false; s.modal.versionId = instanceKey(second)
+  await h.vue.nextTick()
+  assert.equal(s.canConfirm.value, true)
+  await s.confirmDownload()
+  assert.equal(h.fixture.downloads.length, 1)
+  assert.deepEqual(h.fixture.downloads[0].target, { versionId: second.id, kind: 'resourcepack', folder: second.folder })
+  assert.equal(h.fixture.selected.value, selected); assert.deepEqual({ ...s.query }, originalQuery)
+  assert.equal(s.modal.open, false)
+  app.unmount()
+})
+
+test('actual compiled MOD confirmation uses the exact selected instance without changing the launcher selection', async () => {
+  const h = await mountedCommunity(), app = await h.mount(), s = h.fixture.state.current
+  await h.resolveLast()
+  const second = { ...target, folder: 'fixture/other-mod-folder' }
+  const file = { source: 'modrinth', projectId: 'synthetic', fileId: 'mod-file', fileName: 'mod.jar', url: 'https://fixture.invalid/mod.jar', gameVersions: ['1.20.1'], loaders: ['fabric'] }
+  s.allTargets.value = [target, second]; s.modal.open = true; s.modal.kind = 'mod'; s.modal.files = [file]; s.modal.fileId = file.fileId
+  s.modal.loadingFiles = false; s.modal.versionId = instanceKey(second)
+  await h.vue.nextTick()
+  const selected = h.fixture.selected.value, originalQuery = { ...s.query }
+  await s.confirmDownload()
+  assert.equal(s.modRequest.value.target.folder, second.folder); assert.equal(s.modRequest.value.target.id, second.id)
+  assert.equal(h.fixture.selected.value, selected); assert.deepEqual({ ...s.query }, originalQuery)
+  assert.equal(h.fixture.downloads.length, 0, 'MOD dependencies remain handled by the existing install dialog')
+  app.unmount()
 })

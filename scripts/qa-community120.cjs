@@ -6,7 +6,8 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto')
 const SYNTHETIC = [
   { id: 'qa120-fabric', mcVersion: '1.20.1', loader: 'fabric' },
-  { id: 'qa120-forge', mcVersion: '1.21.1', loader: 'forge' }
+  { id: 'qa120-forge', mcVersion: '1.21.1', loader: 'forge' },
+  { id: 'qa120-fabric-other', mcVersion: '1.20.1', loader: 'fabric' }
 ]
 function contained(root, target) {
   const relative = path.relative(root, target)
@@ -184,6 +185,22 @@ async function run(h, binding) {
     await click('[data-ui="community:versions-all"]'); await ready('all versions keeps independently selected loader')
     const allQuery = await lastQuery(); assert.equal(allQuery.mcVersion, undefined); assert.equal(allQuery.loader, 'forge')
     await shot('all-versions-manual-loader-explicit')
+    // Cover the actual download-target SelectMenu path which previously called
+    // an undefined, removed global-selection handler. No install IPC is mocked
+    // or invoked here; compiled handler tests separately verify exact IPC args.
+    const selectionBefore = await evaluate("({id:localStorage.getItem('kamucl.lastVersion')})")
+    assert(installed.some(row => row.id === selectionBefore.id), 'Actual persisted launcher selection must identify an observed instance')
+    const folderBefore = await evaluate("window.kamucl.invoke('settings:get').then(s=>s.activeFolder)")
+    await choose('[aria-label="加载器"]', '.select-menu-float button[title="Fabric"]'); await ready('Fabric target query ready')
+    await click('.result-card .result-dl'); await observe('compatible download chooser ready', "!!document.querySelector('.download-modal .file-list button.active')")
+    await click('[aria-label="下载目标实例"]')
+    await observe('compatible second target is an actual visible option', "[...document.querySelectorAll('.select-menu-float button')].some(e=>e.title.startsWith('qa120-fabric-other ·'))")
+    await click('.select-menu-float button[title^="qa120-fabric-other ·"]')
+    const targetSelection = await observe('exact second target remains selected without global instance change', "(()=>{const e=document.querySelector('[aria-label=\"下载目标实例\"]');return {label:e?.innerText,confirmDisabled:document.querySelector('[data-ui=\"CommunityView:cade5c4fc83a\"]')?.disabled,selected:localStorage.getItem('kamucl.lastVersion')}})()", value => value.label?.includes('qa120-fabric-other') && value.confirmDisabled === false)
+    assert.equal(targetSelection.selected, selectionBefore.id)
+    assert.equal(await evaluate("window.kamucl.invoke('settings:get').then(s=>s.activeFolder)"), folderBefore)
+    proof.downloadTarget = { selectionBefore, targetSelection, classification: 'Actual trusted SelectMenu choice and production v-model; installation was not invoked. Same-name/different-folder IPC target matching is covered by compiled product handler tests.' }; await shot('download-target-second-instance')
+    await click('[data-ui="CommunityView:989d28842ec5"]'); await observe('second target chooser cancels normally', "!!document.querySelector('.download-modal')", value => !value)
     proof.ledger = await inspect(); proof.complete = true
   } catch (error) { originalError = error; proof.error = { name: error.name, message: error.message, stack: error.stack }; save() }
   finally {

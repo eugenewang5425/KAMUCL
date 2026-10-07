@@ -487,7 +487,8 @@ async function confirmDownload() {
   try {
     const res = await communityDownload(file, {
       versionId: target?.id ?? '',
-      kind: modal.kind
+      kind: modal.kind,
+      folder: target?.folder
     })
     modal.open = false
     if (modal.kind === 'modpack') {
@@ -501,7 +502,6 @@ async function confirmDownload() {
     modal.downloading = false
   }
 }
-function selectDownloadInstance() { const target = targetOptions.value.find(v => instanceKey(v) === modal.versionId); if (target) void selectInstance(target.id, target.folder) }
 
 </script>
 
@@ -727,7 +727,7 @@ function selectDownloadInstance() { const target = targetOptions.value.find(v =>
           <!-- 目标版本（整合包安装即新实例，无需选择） -->
           <template v-if="!isModpack">
             <p class="modal-label">下载到版本</p>
-            <SelectMenu v-if="targetOptions.length" v-model="modal.versionId" :options="targetOptions.map(v => ({value:instanceKey(v),label:v.id+' · '+v.mcVersion+' / '+(v.loader || '纯净版')+' · '+v.folder}))" @change="selectDownloadInstance" />
+            <SelectMenu aria-label="下载目标实例" v-if="targetOptions.length" v-model="modal.versionId" :options="targetOptions.map(v => ({value:instanceKey(v),label:v.id+' · '+v.mcVersion+' / '+(v.loader || '纯净版')+' · '+v.folder}))" />
             <p data-ui="CommunityView:ab12acbb18fe" v-else class="files-error">没有与所选文件兼容的已安装实例；可调整文件筛选，或在游戏版本页安装。</p>
           </template>
           <p data-ui="CommunityView:a8e08b82f315" v-else class="muted pack-tip">整合包将下载后自动创建独立实例并安装</p>
