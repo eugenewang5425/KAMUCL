@@ -74,7 +74,7 @@ module.exports = async function(h) {
     proof.minimum = small
     await nav('home'); await screenshot('adaptive-minimum-home')
     proof.keyboardBefore = await state()
-    await h.main(`(()=>{const wc=testElectron.BrowserWindow.fromId(${identity.windowId}).webContents;globalThis.__qaKey116={events:[],wc};__qaKey116.observer=(event,input)=>{if(input.key==='-'||input.key==='0')__qaKey116.events.push({type:input.type,key:input.key,control:input.control,meta:input.meta,alt:input.alt,zoom:wc.getZoomFactor(),at:Date.now()})};wc.on('before-input-event',__qaKey116.observer);return true})()`)
+    await h.main(`(()=>{const wc=testElectron.BrowserWindow.fromId(${identity.windowId}).webContents;globalThis.__qaKey116={events:[],allEvents:[],wc};__qaKey116.observer=(event,input)=>{const value={type:input.type,key:input.key,code:input.code,control:input.control,meta:input.meta,alt:input.alt,shift:input.shift,zoom:wc.getZoomFactor(),at:Date.now()};if(__qaKey116.allEvents.length<128)__qaKey116.allEvents.push(value);if(input.key==='-'||input.key==='0')__qaKey116.events.push(value)};wc.on('before-input-event',__qaKey116.observer);return true})()`)
     proof.nativeMinusInput=mac ? await mac.zoomKey('-') : await h.main(`(${nativeKey.sendOwnedZoomKey})(${JSON.stringify(binding)},189,${JSON.stringify(koffi)})`);await h.wait(200)
     const minus = await state(); proof.keyboardAfterMinus=minus;proof.keyboardEvents=await h.main('__qaKey116.events');save();assert(Math.abs(minus.native.zoom - proof.keyboardBefore.native.zoom/1.1) < .0001)
     proof.nativeResetInput=mac ? await mac.zoomKey('0') : await h.main(`(${nativeKey.sendOwnedZoomKey})(${JSON.stringify(binding)},48,${JSON.stringify(koffi)})`);await h.wait(200); assert(Math.abs((await state()).native.zoom - small.native.zoom) < .0001)
@@ -112,6 +112,7 @@ module.exports = async function(h) {
     fs.writeFileSync(path.join(directory,'summary.json'), JSON.stringify(proof,null,2), { flag:'wx' }); console.log(JSON.stringify({ complete:true, directory, theme:proof.theme }))
   } catch(error) { primary = error; proof.error={ name:error.name, message:error.message, stack:error.stack }; try { const data=Buffer.from((await h.call('Page.captureScreenshot',{format:'png'})).data,'base64');fs.writeFileSync(path.join(directory,'failure.png'),data,{flag:'wx'}) } catch{}; throw error
   } finally {
+    try { proof.keyboardDiagnostic=await h.main('globalThis.__qaKey116?({filteredEvents:__qaKey116.events,allEvents:__qaKey116.allEvents}):null') } catch(error) { proof.keyboardDiagnosticError=error.message }
     try { proof.keyboardObserverRestored=await h.main('globalThis.__qaKey116?(()=>{__qaKey116.wc.removeListener("before-input-event",__qaKey116.observer);delete globalThis.__qaKey116;return true})():true') } catch(error) { proof.keyboardObserverError=error.message }
     try { proof.finalSettingsRestoration = await h.main('globalThis.__qaFit116?__qaFit116.restore():({complete:true,absent:true})'); assert(proof.finalSettingsRestoration.complete) } catch(error) { proof.settingsRestorationError=error.message; if(!primary)throw error }
     try { const result = await h.main('globalThis.__qaCommunity116?__qaCommunity116.restore():({complete:true,absent:true})'); proof.finalFixtureRestoration=result; assert(result.complete) } catch(error) { proof.restorationError=error.message; if(!primary)throw error }

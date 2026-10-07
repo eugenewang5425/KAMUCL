@@ -43,3 +43,4 @@ test('duplicate renderer fails immediately; absent renderer rejects within uncha
  let waits=0;await assert.rejects(bindRenderer(async()=>({appReady:true,windows:[],matches:2}),()=>{},async()=>{waits++}),/More than one/);assert.equal(waits,0)
  await assert.rejects(bindRenderer(async()=>({appReady:true,windows:[],matches:0}),()=>{},async()=>new Promise(resolve=>setTimeout(resolve,3)),5),/did not become ready/)
 })
+test('read-only boot instrumentation cannot restart or extend the original ten-second binding budget',async()=>{let reads=0;await assert.rejects(bindRenderer(async()=>{reads++;return{appReady:true,matches:1,windows:[{role:'main-renderer',visible:true,opacity:1}],binding:{pid:12}}},()=>{},async()=>{},10000,Date.now()-10001),/within 10000 ms/);assert.equal(reads,0)})

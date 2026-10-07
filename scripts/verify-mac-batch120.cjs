@@ -37,8 +37,8 @@ async function connect(port,isMain){
  const evaluate=async(expression,timeoutMs)=>{const result=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true},timeoutMs);assert(!result.exceptionDetails,JSON.stringify(result.exceptionDetails));return result.result.value}
  return{ws,call,evaluate}
 }
-async function bindRenderer(evaluate,observe,waitFor=wait,budgetMs=10000){
- const deadline=Date.now()+budgetMs
+async function bindRenderer(evaluate,observe,waitFor=wait,budgetMs=10000,startedAt=Date.now()){
+ const deadline=startedAt+budgetMs
  while(Date.now()<deadline){
   const state=await evaluate("(()=>{globalThis.testElectron=process.mainModule.require('electron');const windows=testElectron.BrowserWindow.getAllWindows().filter(w=>!w.isDestroyed());const matching=windows.filter(w=>w.webContents.getURL().includes('/renderer/index.html'));return{appReady:testElectron.app.isReady(),windows:windows.map(w=>{const url=w.webContents.getURL();return{windowId:w.id,webContentsId:w.webContents.id,url,visible:w.isVisible(),opacity:w.getOpacity(),role:url.includes('/renderer/index.html')?'main-renderer':url.includes('/renderer/splash.html')?'startup-splash':url?'other':'uncommitted'}}),matches:matching.length,binding:matching.length===1?{pid:process.pid,windowId:matching[0].id,webContentsId:matching[0].webContents.id,profile:testElectron.app.getPath('userData'),executable:process.execPath,version:testElectron.app.getVersion(),arch:process.arch}:null}})()")
   observe({at:Date.now(),...state});assert(state.matches<=1,'More than one actual production renderer exists')
@@ -76,8 +76,10 @@ async function run(){
   let renderer,main
   try{
    renderer=await connect(rendererPort,false);main=await connect(mainPort,true)
+   row.bindingStartedAt=Date.now();row.bindingBudgetMs=10000
+   row.bootObserver=await main.evaluate(`(${require('./mac-boot-observer120.cjs').installBootObserver})(${JSON.stringify({pid:track.pid,profile})})`,row.bindingBudgetMs);save()
    row.bindingSamples=[]
-   const binding=await bindRenderer(main.evaluate,sample=>{row.bindingSamples.push(sample);save()})
+   const binding=await bindRenderer(main.evaluate,sample=>{row.bindingSamples.push(sample);save()},wait,row.bindingBudgetMs,row.bindingStartedAt)
    assert.equal(binding.pid,track.pid);assert.equal(binding.arch,arch);assert.equal(binding.version,pkg.version);assert.equal(fs.realpathSync.native(binding.profile),profile);assert.equal(fs.realpathSync.native(binding.executable),fs.realpathSync.native(exe));row.binding=binding;row.actualExecutableSHA256=hash(binding.executable);assert.equal(row.actualExecutableSHA256,proof.executableSHA256)
    const observedNative=async()=>{
     const state=await main.evaluate(`(()=>{const w=testElectron.BrowserWindow.fromId(${binding.windowId});if(!w||w.webContents.id!==${binding.webContentsId})throw Error('Owned window changed');return{pid:process.pid,windowId:w.id,webContentsId:w.webContents.id,bounds:w.getBounds(),contentBounds:w.getContentBounds(),zoom:w.webContents.getZoomFactor(),focused:w.isFocused(),visible:w.isVisible(),minimized:w.isMinimized(),appHidden:testElectron.app.isHidden()}})()`)
@@ -130,10 +132,12 @@ async function run(){
    row.complete=true
   }catch(error){row.error={name:error.name,message:error.message,stack:error.stack};proof.errors.push({theme,...row.error});save()}
   finally{
+   if(main)try{row.bootObservation=await main.evaluate('globalThis.__qaBoot120?__qaBoot120.snapshot():null');row.bootObserverRestored=await main.evaluate('globalThis.__qaBoot120?__qaBoot120.restore():({complete:true,absent:true})');save()}catch(error){row.bootObservationError={name:error.name,message:error.message};save()}
    if(main)try{await main.evaluate('setTimeout(()=>testElectron.app.quit(),500);true')}catch(error){row.quitRequestError=String(error)}
    renderer?.ws.close();main?.ws.close()
    try{await owned.finishOwnedChild(track,{timeoutMs:15000});assert.equal(track.ledger.code,0);assert.equal(track.ledger.signal,null)}catch(error){row.complete=false;row.cleanupError=String(error);proof.errors.push({theme,cleanup:row.cleanupError});await owned.finishOwnedChild(track,{terminate:true,timeoutMs:7000}).catch(error=>{row.forcedCleanupError=String(error)})}
    fs.closeSync(log);save()
+   try{row.launcherLogs=require('./mac-current-evidence120.cjs').retainLauncherLogs({root,profile,target:path.join(output,theme+'-launcher-logs'),startedAt:Date.parse(track.ledger.startedAt)});save()}catch(error){row.launcherLogCollectionError={name:error.name,message:error.message};save()}
   }
  }
  proof.complete=proof.rows.length===4&&proof.rows.every(row=>row.complete)&&!proof.errors.length;proof.finishedAt=new Date().toISOString();save();assert.equal(proof.complete,true,JSON.stringify(proof.errors));console.log(JSON.stringify({complete:true,output,arch,stage,sourceCommit}))
