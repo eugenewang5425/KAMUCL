@@ -1,5 +1,6 @@
 const test=require('node:test'),assert=require('node:assert/strict')
-const {SOURCE,ASSETS,validateQaPaths,proveReuseSource,verifyManifest}=require('./verify-mac-batch120-reuse.cjs'),{bindRenderer,DOWNLOAD_BUTTON,DOWNLOAD_MASK,backdropExpression,backdropReady}=require('./verify-mac-batch120.cjs')
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os')
+const {SOURCE,ASSETS,validateQaPaths,proveReuseSource,verifyManifest,originalPackageFiles}=require('./verify-mac-batch120-reuse.cjs'),{bindRenderer,DOWNLOAD_BUTTON,DOWNLOAD_MASK,backdropExpression,backdropReady}=require('./verify-mac-batch120.cjs')
 const qa='a'.repeat(40)
 function executor({paths='',dirty='',head=qa}={}){return(_file,args)=>args[0]==='rev-parse'?head:args[0]==='status'?dirty:args[0]==='diff'?paths:assert.fail('Unexpected git action')}
 test('QA-only comparison accepts exact declared QA files and records distinct original/QA sources',()=>{
@@ -16,6 +17,12 @@ test('dirty tracked checkout, a changed QA HEAD or another artifact source rejec
 })
 function originalManifest(){const identity={schemaVersion:1,product:'KAMUCL',platform:'darwin',version:'1.1.20',arch:'arm64',sourceCommit:SOURCE,runtimeVersion:'44.3.0',minimumSystemVersion:'13.0.0',appAsarSHA256:'17d4d9e40785dd588e34a1c0be9bb27f8b675e4a939eb5bd9083e3dd7ab0ec81',signing:'ad-hoc; not Developer ID or notarized'};return{version:'1.1.20',arch:'arm64',commit:SOURCE,runtimeVersion:'44.3.0',frameworkVersion:'44.3.0',minimum:'13.0.0',signing:'ad-hoc; not Developer ID or notarized',packageIntegrity:true,nativeAcceptance:'separate required native APP/DMG/game/tools/update jobs',appAsarSHA256:identity.appAsarSHA256,buildIdentity:identity,buildIdentitySHA256:'6f047dad4873d1eb34a94c36123a07b02cf532c9a3b7c7685dc14f629ad8c325',assets:ASSETS}}
 test('original native package manifest preserves exact raw SHA, source, runtime, ABI and ZIP/DMG hashes',()=>{const original=originalManifest();assert.deepEqual(verifyManifest(Buffer.from(JSON.stringify(original,null,2))),original)})
+test('actual artifact-ids directory layout locates the original manifest and both assets; flat unrelated files cannot replace it',()=>{
+ const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'mac-reuse120-')))
+ try{fs.writeFileSync(path.join(root,'mac-package-arm64.json'),'unrelated flat manifest');assert.throws(()=>originalPackageFiles(root),/ENOENT/);const directory=path.join(root,'mac-packages-arm64');fs.mkdirSync(directory);fs.writeFileSync(path.join(directory,'mac-package-arm64.json'),JSON.stringify(originalManifest(),null,2));for(const a of ASSETS)fs.writeFileSync(path.join(directory,a.name),'artifact layout fixture; not package bytes')
+  const files=originalPackageFiles(root);assert.equal(files.manifest,path.join(directory,'mac-package-arm64.json'));assert.deepEqual(verifyManifest(fs.readFileSync(files.manifest)),originalManifest());assert.equal(files.zip,path.join(directory,ASSETS[0].name));assert.equal(files.dmg,path.join(directory,ASSETS[1].name));fs.unlinkSync(files.dmg);assert.throws(()=>originalPackageFiles(root),/ENOENT/)
+ }finally{assert.equal(path.dirname(root),fs.realpathSync.native(os.tmpdir()));assert(path.basename(root).startsWith('mac-reuse120-'));fs.rmSync(root,{recursive:true,force:true})}
+})
 test('semantically similar or modified manifest cannot authorize altered/rebuilt artifacts',()=>{
  const value=originalManifest();assert.throws(()=>verifyManifest(Buffer.from(JSON.stringify(value))),/manifest SHA/)
  value.assets=[{...value.assets[0],sha256:'0'.repeat(64)},value.assets[1]];assert.throws(()=>verifyManifest(Buffer.from(JSON.stringify(value,null,2))),/manifest SHA/)
