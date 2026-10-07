@@ -291,6 +291,39 @@ jobs:
             release/mac-job-*
           if-no-files-found: error
 
+  batch120:
+    if: inputs.verification_groups != 'parity'
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [app, dmg]
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-packages-arm64
+          path: release
+      - name: Enable actual desktop material in this disposable native session
+        run: defaults write com.apple.universalaccess reduceTransparency -bool false
+      - name: Current signed package download status and community selection with native foreground
+        run: node scripts/verify-mac-job.cjs batch120 arm64 ${{ matrix.stage }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-batch120-arm64-${{ matrix.stage }}
+          path: |
+            release/mac-batch120-proof-*
+            release/mac-job-*
+          if-no-files-found: error
+
   resources:
     if: github.event_name == 'workflow_dispatch' && inputs.resource_comparison == true
     needs: package

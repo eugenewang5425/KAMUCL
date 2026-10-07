@@ -12,8 +12,8 @@ import { ParallelProgress } from './parallelProgress'
 import { copyRuntimeProfile } from './packRuntime'
 import { fmlArgument, missingNeoRuntime, reuseExternalRuntimeLibraries } from './externalRuntime'
 import type { FabricApiVersion, LoaderName, ProgressEvent } from '../../shared/types'
-import { BMCL_MAVEN_ROOT, downloadAll, downloadFile, fetchSignal } from './download'
-import { isCancelError } from './tasks'
+import { BMCL_MAVEN_ROOT, downloadAll, downloadCandidates, downloadFile, fetchSignal } from './download'
+import { isCancelError, waitIfTaskPaused } from './tasks'
 import { downloadLoaderInstaller } from './installerDownload'
 import { prepareInstallerDependencies } from './installerDependencies'
 import { SmoothedSpeedEstimator } from './downloadProgress'
@@ -140,6 +140,59 @@ export async function listLoaderVersions(
 }
 
 // ---------------- 安装 ----------------
+
+/** Legacy Forge builds can publish a branch suffix absent from the pack's
+ * loader version. Resolve the exact Maven coordinate rather than append the
+ * Minecraft version to every old build (many also have an unsuffixed release). */
+export async function resolveForgeInstallerUrl(
+  mcVersion: string,
+  loaderVersion: string,
+  mirror: 'official' | 'bmclapi',
+  signal?: AbortSignal
+): Promise<string> {
+  signal?.throwIfAborted()
+  const base = `${mcVersion}-${loaderVersion}`
+  const installerUrl = (coordinate: string) =>
+    `https://maven.minecraftforge.net/net/minecraftforge/forge/${coordinate}/forge-${coordinate}-installer.jar`
+  // Modern Forge and explicitly supplied branch coordinates keep their URL
+  // and perform no extra metadata request.
+  if (!/^1\.(?:[1-9]|1[0-2])(?:\.\d+)?$/.test(mcVersion) || loaderVersion.includes('-')) {
+    return installerUrl(base)
+  }
+  const metadata = 'https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml'
+  for (const source of downloadCandidates([metadata], mirror)) {
+    await waitIfTaskPaused(signal)
+    signal?.throwIfAborted()
+    const timeout = AbortSignal.timeout(4000)
+    const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
+    try {
+      // Use Chromium's OS/PAC route on the desktop just like the version
+      // catalog. Node fetch alone can miss the player's configured proxy.
+      const fetcher = process.versions.electron ? (await import('electron')).net.fetch : fetch
+      await waitIfTaskPaused(signal)
+      requestSignal.throwIfAborted()
+      const response = await fetcher(source, { signal: requestSignal })
+      if (!response.ok) { await response.body?.cancel(); continue }
+      const xml = await response.text()
+      requestSignal.throwIfAborted()
+      const versions = [...xml.matchAll(/<version>([^<]+)<\/version>/g)].map(match => match[1].trim())
+      if (versions.includes(base)) return installerUrl(base)
+      const branches = [...new Set(versions.filter(version =>
+        version.startsWith(`${base}-`) && /^[A-Za-z0-9._-]+$/.test(version)))]
+      const coordinate = branches.find(version => version === `${base}-${mcVersion}`) ??
+        (branches.length === 1 ? branches[0] : undefined)
+      if (coordinate) return installerUrl(coordinate)
+    } catch (error) {
+      signal?.throwIfAborted()
+      loaderLog.warn(`旧版 Forge Maven 元数据不可用：${source}（${error instanceof Error ? error.message : String(error)}）`)
+    }
+  }
+  // A missing/unavailable index must not break legacy builds which already
+  // use the ordinary coordinate. Installer download retains its own fallback,
+  // sidecar checksum and install_profile processing.
+  signal?.throwIfAborted()
+  return installerUrl(base)
+}
 
 /** 选一个可用 java 运行安装器：优先本机扫描，实在不行用 ensureJava 下载 */
 async function pickJavaForInstaller(mcVersion: string, emit: ProgressEmit, signal?: AbortSignal): Promise<string> {
@@ -398,15 +451,6 @@ async function installLoaderInternal(
   }
 
   // ---- forge / neoforge：下载 installer 并运行 ----
-  const fileBase =
-    loader === 'forge'
-      ? `forge-${mcVersion}-${loaderVersion}-installer.jar`
-      : `neoforge-${loaderVersion}-installer.jar`
-  const officialUrl =
-    loader === 'forge'
-      ? `https://maven.minecraftforge.net/net/minecraftforge/forge/${mcVersion}-${loaderVersion}/${fileBase}`
-      : `https://maven.neoforged.net/releases/net/neoforged/neoforge/${loaderVersion}/${fileBase}`
-
   const jarPath = path.join(os.tmpdir(), `kamucl-${loader}-installer-${Date.now()}.jar`)
   try {
     // A user-owned matching loader instance must not be renamed into a new pack.
@@ -460,6 +504,9 @@ async function installLoaderInternal(
             loaderEmit({ stage: 'loader', progress: 0.2, text: `下载 ${loader} 安装器` })
             const estimator = new SmoothedSpeedEstimator()
             let networkBytes = 0
+            const officialUrl = loader === 'forge'
+              ? await resolveForgeInstallerUrl(mcVersion, loaderVersion, getSettings().mirror, signal)
+              : `https://maven.neoforged.net/releases/net/neoforged/neoforge/${loaderVersion}/neoforge-${loaderVersion}-installer.jar`
             await downloadLoaderInstaller(officialUrl, jarPath, getSettings().mirror, (d, t, wire = 0) => {
               networkBytes += wire
               const rate = estimator.sample(networkBytes, t ? Math.max(0, t - d) : null, performance.now())

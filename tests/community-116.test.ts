@@ -50,8 +50,10 @@ test('Chinese multiple aliases merge original domestic-name results, keep every 
     return Response.json({ hits: ids.map(id => ({ project_id: id, slug: id, title: id })), total_hits: ids.length })
   })
   const a = await runtime.communitySearchPage(query), b = await runtime.communitySearchPage({ ...query, offset: 2 }), c = await runtime.communitySearchPage({ ...query, offset: 4 })
-  assert.equal(a.total, 5)
-  assert.deepEqual([...a.items, ...b.items, ...c.items].map(item => item.projectId), ['domestic', 'shared', 'jei', 'rei', 'emi'])
+  assert.equal(a.total, 4)
+  // The old expectation included "shared", an unrelated slug returned by an
+  // alias search. An alias query is not proof of that project's identity.
+  assert.deepEqual([...a.items, ...b.items, ...c.items].map(item => item.projectId), ['domestic', 'jei', 'rei', 'emi'])
   assert.equal(urls.length, 4, 'later pages slice the same catalog')
   for (const url of urls) {
     const facets: string[] = JSON.parse(url.searchParams.get('facets')!).flat()
@@ -65,7 +67,7 @@ test('an alias with no results retries the original Chinese name rather than hid
     return Response.json({ hits: kw === '万用皮肤' ? [{ project_id: 'native', title: '万用皮肤' }] : [], total_hits: kw === '万用皮肤' ? 1 : 0 })
   })
   const result = await runtime.communitySearchPage({ ...query, keyword: '万用皮肤' })
-  assert.equal(result.items[0].projectId, 'native'); assert.deepEqual(terms, ['customskinloader', '万用皮肤'])
+  assert.equal(result.items[0].projectId, 'native'); assert.deepEqual(terms, ['万用皮肤', 'customskinloader'])
 })
 test('broad Chinese alias unions disclose the retrieval cap instead of claiming complete provider totals', async t => {
   const runtime = await searchFixture(t, async input => {
@@ -73,7 +75,9 @@ test('broad Chinese alias unions disclose the retrieval cap instead of claiming 
     return Response.json({ hits: Array.from({ length: count }, (_, i) => ({ project_id: `${keyword}-${offset + i}`, title: 'fixture' })), total_hits: 170 })
   })
   const result = await runtime.communitySearchPage(query)
-  assert.equal(result.total, 400)
+  // Only the original Chinese query may contribute broad hits; synthetic
+  // alias results have no verified matching slug and cannot inflate totals.
+  assert.equal(result.total, 100)
   assert(result.warnings?.some(message => message.includes('前 100 项')))
 })
 

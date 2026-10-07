@@ -2,13 +2,14 @@
 import ContentSkeleton from '../components/ContentSkeleton.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { communityDownload, communityFiles, communitySearch, errText, getManifest, getModTargets } from '../api'
-import { store, toast, selectedInstance, selectInstance, displayVersionName as versionLabel } from '../store'
+import { store, toast, selectedInstance, displayVersionName as versionLabel } from '../store'
 import { instanceKey } from '@shared/modCompatibility'
 import { communityFileMatchesInstance, usesCommunityLoader } from '@shared/communityPolicy'
 import { mcmodSearchUrl } from '@shared/communityLinks'
 import SelectMenu from '../components/SelectMenu.vue'
 import CommunityVersionFilter from '../components/CommunityVersionFilter.vue'
 import { readCommunitySession, saveCommunitySession } from '../communitySession'
+import { initialCommunityQuery, initialCommunityVersionSelection, chooseCommunityInstance, usableCommunityInstance, type CommunityVersionSource } from '../communityVersionSelection'
 const previousSession = readCommunitySession()
 import MarqueeText from '../components/MarqueeText.vue'
 import ModInstallDialog from '../components/ModInstallDialog.vue'
@@ -150,15 +151,15 @@ const versionInput = ref(previousSession?.versionInput ?? '')
 
 onMounted(() => void loadManifest())
 
-const query = reactive({
-  keyword: '',
-  kind: 'mod' as CommunityKind,
-  source: 'all' as 'all' | CommunitySource,
-  mcVersion: currentInstance.value?.mcVersion === '未知' ? '' : currentInstance.value?.mcVersion ?? '',
-  loader: currentInstance.value?.loader ?? '' as '' | LoaderName,
-  sort: 'relevance' as 'relevance' | 'downloads' | 'newest'
-})
-if (previousSession) Object.assign(query, previousSession.query)
+const query = reactive(initialCommunityQuery(previousSession))
+const versionSelection = reactive(initialCommunityVersionSelection(previousSession))
+const installedVersionOptions = computed(() => store.installed.filter(usableCommunityInstance).map(v => ({
+  value: instanceKey(v), label: versionLabel(v), description: `Minecraft ${v.mcVersion} · ${v.loader || '原版'} · ${v.folder}`
+})))
+const filterInstance = computed(() => store.installed.find(v => instanceKey(v) === versionSelection.instance))
+const versionSummary = computed(() => query.mcVersion ? `Minecraft ${query.mcVersion}` : '全部 Minecraft 版本')
+const loaderSummary = computed(() => query.loader ? loaderOptions.find(v => v.value === query.loader)?.label ?? query.loader : '全部加载器')
+const manualLoaderMismatch = computed(() => versionSelection.source === 'installed' && versionSelection.loaderSource === 'manual' && filterInstance.value && (filterInstance.value.loader ?? '') !== query.loader)
 // query 必须先初始化。过早运行 getter 会抛错，导致监听未订阅分类变化。
 watch(() => query.kind, () => nextTick(updateKindBlob), { flush: 'post' })
 const supportsLoader = computed(() => usesCommunityLoader(query.kind))
@@ -192,7 +193,7 @@ const listCard = ref<HTMLElement | null>(null)
 let searchGeneration = 0
 let disposed = false
 onBeforeUnmount(() => {
-  saveCommunitySession({ query: { ...query }, tab: communityTab.value, favoriteSearch: favoriteSearch.value, versionInput: versionInput.value, results: results.value, searched: searched.value, error: loadError.value, offset: offset.value, hasMore: hasMore.value, page: currentPage.value, total: totalResults.value, warnings: searchWarnings.value, scrollTop: document.querySelector<HTMLElement>('.content')?.scrollTop ?? 0, topKeyword: store.searchKeyword, interrupted: loading.value || loadingMore.value })
+  saveCommunitySession({ query: { ...query }, tab: communityTab.value, favoriteSearch: favoriteSearch.value, versionInput: versionInput.value, versionSelection: { ...versionSelection }, results: results.value, searched: searched.value, error: loadError.value, offset: offset.value, hasMore: hasMore.value, page: currentPage.value, total: totalResults.value, warnings: searchWarnings.value, scrollTop: document.querySelector<HTMLElement>('.content')?.scrollTop ?? 0, topKeyword: store.searchKeyword, interrupted: loading.value || loadingMore.value })
   disposed = true; searchGeneration++; fileGeneration++; openGeneration++
 })
 async function doSearch(reset: boolean, page = currentPage.value) {
@@ -271,10 +272,7 @@ onMounted(() => {
 })
 onUnmounted(() => { moreObserver?.disconnect(); searchGeneration++; fileGeneration++; if (topSearchTimer) clearTimeout(topSearchTimer) })
 function useCurrentInstance() {
-  query.mcVersion = currentInstance.value?.mcVersion === '未知' ? '' : currentInstance.value?.mcVersion ?? ''
-  query.loader = currentInstance.value?.loader ?? ''
-  versionInput.value = query.mcVersion
-  onFilterChange()
+  if (currentInstance.value) useInstance(instanceKey(currentInstance.value))
 }
 versionInput.value = query.mcVersion
 
@@ -282,10 +280,43 @@ versionInput.value = query.mcVersion
 function useInstance(id: string) {
   const v = store.installed.find((x) => instanceKey(x) === id)
   if (!v) return
-  void selectInstance(v.id, v.folder)
-  query.mcVersion = v.mcVersion === '未知' ? '' : v.mcVersion
-  query.loader = v.loader ?? ''
+  const choice = chooseCommunityInstance(v, versionSelection, query.loader ?? '')
+  if (!choice) return
+  Object.assign(versionSelection, choice.selection)
+  query.mcVersion = choice.mcVersion
+  query.loader = choice.loader
   versionInput.value = query.mcVersion
+  onFilterChange()
+}
+function chooseVersionSource(source: CommunityVersionSource) {
+  const previousSource = versionSelection.source
+  versionSelection.source = source
+  if (source === 'all') {
+    versionSelection.instance = ''
+    query.mcVersion = ''; versionInput.value = ''
+    if (versionSelection.loaderSource === 'instance') { query.loader = ''; versionSelection.loaderSource = 'all' }
+    onFilterChange()
+  } else if (source === 'installed' && previousSource !== 'installed') {
+    versionSelection.instance = ''
+    query.mcVersion = ''; versionInput.value = ''
+    if (versionSelection.loaderSource === 'instance') { query.loader = ''; versionSelection.loaderSource = 'all' }
+    onFilterChange()
+  } else if (source === 'custom') {
+    versionSelection.instance = ''
+    if (versionSelection.loaderSource === 'instance') versionSelection.loaderSource = query.loader ? 'manual' : 'all'
+    void nextTick(() => document.querySelector<HTMLInputElement>('[data-ui="community:custom-version"] input')?.focus())
+  }
+}
+function customVersionChanged() {
+  versionSelection.source = query.mcVersion ? 'custom' : 'all'
+  versionSelection.instance = ''
+  versionInput.value = query.mcVersion ?? ''
+  onFilterChange()
+}
+function loaderChanged() { versionSelection.loaderSource = query.loader ? 'manual' : 'all'; onFilterChange() }
+function useInstanceLoader() {
+  query.loader = filterInstance.value?.loader ?? ''
+  versionSelection.loaderSource = 'instance'
   onFilterChange()
 }
 
@@ -302,6 +333,7 @@ function onReset() {
   query.loader = ''
   query.sort = 'relevance'
   versionInput.value = ''
+  Object.assign(versionSelection, { source: 'all', instance: '', loaderSource: 'all' })
   void doSearch(true)
 }
 
@@ -483,11 +515,6 @@ function selectDownloadInstance() { const target = targetOptions.value.find(v =>
 
     <div class="community-sections" role="tablist" aria-label="社区资源分区" @keydown="sectionKeyboard"><button class="community-section" role="tab" data-ui="community:browse" :tabindex="communityTab === 'browse' ? 0 : -1" :aria-selected="communityTab === 'browse'" :class="{ active: communityTab === 'browse' }" @click="communityTab = 'browse'">找资源</button><button class="community-section" role="tab" data-ui="community:favorites" :tabindex="communityTab === 'favorites' ? 0 : -1" :aria-selected="communityTab === 'favorites'" :class="{ active: communityTab === 'favorites' }" @click="communityTab = 'favorites'">已收藏 MOD <span>{{ favorites.length }}</span></button></div>
 
-      <div data-ui="CommunityView:f7acd66aeb10" class="filter-row instance-row">
-        <label data-ui="CommunityView:34312978e030" class="instance-label">选择版本</label>
-        <SelectMenu v-if="store.installed.length" class="filter-select instance-filter" aria-label="选择版本" :model-value="currentInstance ? instanceKey(currentInstance) : ''" placeholder="选择实例…" :options="store.installed.filter(x => !x.failed && !x.incomplete).map(v => ({value:instanceKey(v),label:versionLabel(v),description:[v.mcVersion,v.loader,v.folder].filter(Boolean).join(' · ')}))" @change="useInstance" />
-        <button data-ui="CommunityView:49df26abb0c5" class="btn btn-ghost btn-sm" @click="useCurrentInstance">使用当前实例</button>
-      </div>
     <CommunityFavorites v-if="communityTab === 'favorites'" :keyword="favoriteSearch" @download="openDownload($event, 'mod')" @details="detailProject = $event" @browse="communityTab = 'browse'; query.kind = 'mod'; onFilterChange()" />
     <template v-else>
     <!-- 搜索卡片 -->
@@ -506,11 +533,30 @@ function selectDownloadInstance() { const target = targetOptions.value.find(v =>
         </button>
       </div>
 
+      <section class="version-filter-panel" aria-label="Minecraft 版本筛选">
+        <div class="version-filter-heading"><strong>适用游戏版本</strong><span class="muted">{{ versionSummary }}<template v-if="supportsLoader"> · {{ loaderSummary }}</template></span></div>
+        <div class="version-source-options" role="group" aria-label="版本选择来源">
+          <button type="button" class="version-source-option" data-ui="community:versions-all" :class="{ active: versionSelection.source === 'all' }" :aria-pressed="versionSelection.source === 'all'" @click="chooseVersionSource('all')">全部版本</button>
+          <button type="button" class="version-source-option" data-ui="community:versions-installed" :class="{ active: versionSelection.source === 'installed' }" :aria-pressed="versionSelection.source === 'installed'" @click="chooseVersionSource('installed')">已安装版本<span>{{ installedVersionOptions.length }}</span></button>
+          <button type="button" class="version-source-option" data-ui="community:versions-custom" :class="{ active: versionSelection.source === 'custom' }" :aria-pressed="versionSelection.source === 'custom'" @click="chooseVersionSource('custom')">自定义版本</button>
+        </div>
+        <div v-if="versionSelection.source === 'installed'" class="version-filter-detail" data-ui="CommunityView:f7acd66aeb10">
+          <SelectMenu v-if="installedVersionOptions.length" class="instance-filter" aria-label="选择已安装版本" :model-value="versionSelection.instance" placeholder="选择已安装实例以筛选…" :options="installedVersionOptions" @change="useInstance" />
+          <p v-else class="muted">暂无可识别的已安装版本；可使用自定义版本。</p>
+          <button data-ui="CommunityView:49df26abb0c5" class="btn btn-ghost btn-sm" :disabled="!currentInstance || !usableCommunityInstance(currentInstance)" @click="useCurrentInstance">使用当前实例</button>
+        </div>
+        <div v-if="versionSelection.source === 'custom'" class="version-filter-detail custom-version-detail" data-ui="community:custom-version">
+          <CommunityVersionFilter v-model="query.mcVersion" :versions="manifestVersions" :loading="manifestLoading" @change="customVersionChanged" />
+          <p class="muted">从列表选择，或输入完整版本后按 Enter；快照和自定义版本按原值查询。</p>
+        </div>
+        <div v-if="manualLoaderMismatch && supportsLoader" class="version-loader-note" role="status">已保留手选的 {{ loaderSummary }}；该实例使用 {{ filterInstance?.loader || '原版' }}。<button type="button" class="btn btn-ghost btn-sm" @click="useInstanceLoader">使用实例加载器</button></div>
+      </section>
+
       <div data-ui="CommunityView:d516b82f0eb8" class="search-row">
         <input data-ui="CommunityView:bc0450fd9c8f"
           v-model="query.keyword"
           class="input"
-          :placeholder="query.kind === 'mod' ? '输入 MOD 名称或 MC百科中文名，回车搜索…' : '输入资源名称，回车搜索…'"
+          :placeholder="query.kind === 'mod' ? '输入 MOD 中文名、常用别名或英文名，回车搜索…' : '输入资源名称，回车搜索…'"
           @keyup.enter="onSearch"
         />
         <button data-ui="CommunityView:ce39174e4563" class="btn btn-gold search-btn" :disabled="loading" @click="onSearch">
@@ -526,8 +572,7 @@ function selectDownloadInstance() { const target = targetOptions.value.find(v =>
 
       <div class="filter-row">
         <SelectMenu aria-label="资源来源" v-model="query.source" class="filter-select" :options="sourceOptions" @change="onFilterChange" />
-        <CommunityVersionFilter v-model="query.mcVersion" :versions="manifestVersions" :loading="manifestLoading" @change="versionInput = query.mcVersion; onFilterChange()" />
-        <SelectMenu aria-label="加载器" v-if="supportsLoader" v-model="query.loader" class="filter-select" :options="loaderOptions" @change="onFilterChange" />
+        <SelectMenu aria-label="加载器" v-if="supportsLoader" v-model="query.loader" class="filter-select" :options="loaderOptions" @change="loaderChanged" />
         <SelectMenu aria-label="排序" v-model="query.sort" class="filter-select" :options="sortOptions" @change="onFilterChange" />
       </div>
     </div>
@@ -708,8 +753,20 @@ function selectDownloadInstance() { const target = targetOptions.value.find(v =>
 .community-section.active { background:var(--accent-soft);color:var(--accent-2);font-weight:600; }
 .community-section span { display:grid;place-items:center;min-width:20px;height:20px;padding:0 5px;background:var(--card);border-radius:6px;font-size:11px;font-variant-numeric:tabular-nums; }
 .community-section:focus-visible { outline:2px solid var(--accent);outline-offset:2px; }
-.instance-row { align-items: baseline; }
-.instance-label { align-self: baseline; line-height: 1.4; white-space: nowrap; }
+.version-filter-panel { display:grid; gap:var(--space-3); padding:var(--space-3); border:1px solid var(--border); border-radius:var(--radius-md); background:var(--card-2); }
+.version-filter-heading { display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:var(--space-2); font-size:var(--text-sm); }
+.version-filter-heading .muted { font-size:var(--text-xs); overflow-wrap:anywhere; }
+.version-source-options { display:flex; flex-wrap:wrap; gap:var(--space-2); }
+.version-source-option { display:inline-flex; align-items:center; justify-content:center; gap:var(--space-2); min-height:var(--ctl-h); padding:var(--space-2) var(--space-4); border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--card); color:var(--text-dim); font:inherit; font-size:var(--text-sm); cursor:pointer; }
+.version-source-option:hover { background:var(--hover); color:var(--text); }
+.version-source-option.active { border-color:var(--accent); background:var(--accent-soft); color:var(--text); font-weight:600; }
+.version-source-option:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.version-source-option span { min-width:1.4em; padding:1px 5px; border-radius:var(--radius-sm); background:var(--hover); font-size:var(--text-xs); }
+.version-filter-detail { display:flex; align-items:center; flex-wrap:wrap; gap:var(--space-2); min-width:0; }
+.version-filter-detail :deep(.instance-filter) { flex:1; min-width:min(230px,100%); max-width:100%; }
+.version-filter-detail .muted { flex:1; margin:0; font-size:var(--text-xs); line-height:1.5; }
+.custom-version-detail :deep(.community-version-filter) { flex:1; min-width:min(170px,100%); }
+.version-loader-note { display:flex; align-items:center; flex-wrap:wrap; gap:var(--space-2); color:var(--text-dim); font-size:var(--text-xs); }
 .page {
   display: flex;
   flex-direction: column;

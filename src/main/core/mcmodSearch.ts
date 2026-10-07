@@ -42,6 +42,21 @@ function text(html: string): string {
 function anchors(html: string): Array<{ href: string; title: string }> {
   return [...html.matchAll(/<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a\s*>/gi)].map(match => ({ href: text(match[2]), title: text(match[3]) }))
 }
+/** Slash-separated names are explicit names in an encyclopedia heading, not
+ * fuzzy synonyms inferred from article text. Keep similarly named editions
+ * separate, and do not use an English subtitle as a Chinese download identity. */
+export function mcmodNameRank(title: string, keyword: string): number {
+  const name = title.replace(/^\[[^\]]+\]\s*/, '').replace(/\s+\([^一-鿿]*\)\s*$/, '').trim()
+  const key = normalizeChineseModKeyword(keyword), main = normalizeChineseModKeyword(name)
+  if (!key) return Infinity
+  if (main === key) return 0
+  if (name.split(/[／/]/).some(part => normalizeChineseModKeyword(part) === key)) return 1
+  return main.includes(key) ? 2 : Infinity
+}
+export function parseMcmodEntryTitle(html: string): string | undefined {
+  const heading = html.match(/<div\b[^>]*class=["'][^"']*\bclass-title\b[^"']*["'][^>]*>([\s\S]*?)<h3\b[^>]*>([\s\S]*?)<\/h3>/i)?.[2]
+  return heading ? text(heading) : undefined
+}
 export function parseMcmodSearch(html: string, keyword: string): Candidate[] {
   // Limit parsing to the result list. Navigation, article bodies and unrelated
   // "recommended" entries cannot contribute project identities.
@@ -58,14 +73,14 @@ export function parseMcmodSearch(html: string, keyword: string): Candidate[] {
       if (url.protocol !== 'https:' || url.hostname !== 'www.mcmod.cn' || url.username || url.password || !id || !anchor.title) continue
       // The English subtitle is useful for display only. Exact Chinese title
       // wins over similarly named add-ons, editions and unrelated body matches.
-      const name = anchor.title.replace(/^\[[^\]]+\]\s*/, '').replace(/\s+\(.*\)\s*$/, '')
-      if (!normalizeChineseModKeyword(name).includes(key)) continue
+      const name = anchor.title.replace(/^\[[^\]]+\]\s*/, '').replace(/\s+\([^一-鿿]*\)\s*$/, '')
+      if (!Number.isFinite(mcmodNameRank(name, key))) continue
       found.push({ id, title: name, url: `https://www.mcmod.cn/class/${id}.html` })
     }
   }
   const unique = [...new Map(found.map(item => [item.id, item])).values()]
-  const exact = unique.filter(item => normalizeChineseModKeyword(item.title) === key)
-  return exact.length ? exact : unique
+  const exact = unique.filter(item => mcmodNameRank(item.title, key) < 2)
+  return (exact.length ? exact : unique).sort((a, b) => mcmodNameRank(a.title, key) - mcmodNameRank(b.title, key))
 }
 export function parseMcmodProjects(html: string): McmodProjectLink[] {
   // Project links are in the entry's related-link list, before version/author
@@ -135,7 +150,7 @@ export async function lookupMcmod(keyword: string, fetcher: typeof fetch = deskt
     try {
       const html = await readHtml(`https://search.mcmod.cn/s?${params}`, fetcher, signal)
       let candidates = parseMcmodSearch(html, keyword)
-      const exact = () => candidates.some(item => normalizeChineseModKeyword(item.title) === key)
+      const exact = () => candidates.some(item => mcmodNameRank(item.title, key) < 2)
       let limited = false
       if (!exact() && /data-page=["']2["']/.test(html)) {
         params.set('page', '2')
@@ -143,7 +158,7 @@ export async function lookupMcmod(keyword: string, fetcher: typeof fetch = deskt
         candidates = [...new Map([...candidates, ...parseMcmodSearch(next, keyword)].map(item => [item.id, item])).values()]
         limited = /data-page=["']3["']/.test(next)
       }
-      const matched = candidates.filter(item => normalizeChineseModKeyword(item.title) === key)
+      const matched = candidates.filter(item => mcmodNameRank(item.title, key) < 2)
       if (matched.length) candidates = matched
       limited ||= candidates.length > MAX_ENTRIES
       candidates = candidates.slice(0, MAX_ENTRIES)
@@ -152,7 +167,16 @@ export async function lookupMcmod(keyword: string, fetcher: typeof fetch = deskt
       await Promise.all(Array.from({ length: Math.min(2, candidates.length) }, async () => {
         while (cursor < candidates.length) {
           const index = cursor++, candidate = candidates[index]
-          try { entries[index] = { ...candidate, projects: parseMcmodProjects(await readHtml(candidate.url, fetcher, signal)) } }
+          try {
+            const page = await readHtml(candidate.url, fetcher, signal), title = parseMcmodEntryTitle(page)
+            // A changed entry title must still match the requested name. Never
+            // link a stale search result to an unrelated, renamed entry page.
+            if (title && (!Number.isFinite(mcmodNameRank(title, key)) || (mcmodNameRank(candidate.title, key) < 2 && mcmodNameRank(title, key) >= 2))) {
+              warnings.push(`MC百科“${candidate.title}”的条目名称已变化，未关联其他同名项目；请核对完整名称。`)
+              continue
+            }
+            entries[index] = { ...candidate, ...(title ? { title } : {}), projects: parseMcmodProjects(page) }
+          }
           catch { warnings.push(`MC百科“${candidate.title}”的来源链接读取失败，未自动关联项目；可重试。`) }
         }
       }))

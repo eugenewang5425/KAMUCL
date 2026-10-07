@@ -2315,7 +2315,7 @@ onUnmounted(() => {
 .dl-stages { display: grid; gap: 10px; margin-top: 14px; }
 .dl-stage { min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--card-2); }
 .dl-stage-heading { display: flex; justify-content: space-between; gap: 8px; font-size: var(--text-xs); font-weight: 600; }
-.dl-stage-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); margin-top: 3px; }
+.dl-stage-detail { overflow-wrap: anywhere; white-space: normal; line-height: 1.5; font-size: var(--text-xs); margin-top: 3px; }
 .dl-stage .dl-bar { height: 3px; margin-top: 6px; }
 .dl-stage.is-done .dl-stage-heading { color: var(--accent); }
 .dl-bar.is-indeterminate .dl-bar-fill {

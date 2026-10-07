@@ -1,4 +1,5 @@
 import type { CommunityQuery, CommunityResult } from '@shared/types'
+import type { CommunityVersionSelection } from './communityVersionSelection'
 
 /** Route-local, memory-only history: leaving the page releases its DOM and dialogs. */
 export interface CommunitySession {
@@ -6,6 +7,7 @@ export interface CommunitySession {
   tab: 'browse' | 'favorites'
   favoriteSearch: string
   versionInput: string
+  versionSelection?: CommunityVersionSelection
   results: CommunityResult[]
   searched: boolean
   error: string
