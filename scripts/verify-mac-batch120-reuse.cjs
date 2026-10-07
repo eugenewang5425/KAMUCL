@@ -14,6 +14,13 @@ function proveReuseSource(artifactSourceCommit,qaSourceCommit,{execute=execFileS
  return{mode:'exact original artifact with explicitly bounded QA-only source differences',artifactSourceCommit,qaSourceCommit,changedPaths,allowedQaPaths:[...ALLOWED],unchanged:'All other Git-tracked bytes/modes, including shared production, version, lock/runtime, native and renderer'}
 }
 function verifyManifest(bytes){assert.equal(sha(bytes),MANIFEST,'Original raw package manifest SHA differs');const value=JSON.parse(bytes.toString());assert.equal(value.commit,SOURCE);assert.equal(value.version,'1.1.20');assert.equal(value.arch,'arm64');assert.equal(value.runtimeVersion,'44.3.0');assert.equal(value.frameworkVersion,'44.3.0');assert.equal(value.minimum,'13.0.0');assert.equal(value.packageIntegrity,true);assert.equal(value.buildIdentity.sourceCommit,SOURCE);assert.equal(value.buildIdentity.appAsarSHA256,value.appAsarSHA256);assert.deepEqual(value.assets,ASSETS);return value}
+function originalPackageFiles(releaseDirectory=path.resolve('release')){
+ // download-artifact with artifact-ids retains the original artifact-name
+ // directory. Never reinterpret another manifest or silently choose a file.
+ const directory=path.join(releaseDirectory,'mac-packages-arm64');assert(fs.lstatSync(directory).isDirectory()&&!fs.lstatSync(directory).isSymbolicLink(),'Original artifact directory required')
+ const names=['mac-package-arm64.json',...ASSETS.map(a=>a.name)],files=Object.fromEntries(names.map(name=>{const file=path.join(directory,name);assert(fs.lstatSync(file).isFile()&&!fs.lstatSync(file).isSymbolicLink(),'Original regular artifact file required: '+name);return[name,file]}))
+ return{directory,manifest:files[names[0]],zip:files[ASSETS[0].name],dmg:files[ASSETS[1].name]}
+}
 async function fileSHA(file){const hash=crypto.createHash('sha256');for await(const bytes of fs.createReadStream(file))hash.update(bytes);return hash.digest('hex')}
 async function run(){
  assert.equal(process.platform,'darwin');assert.equal(process.arch,'arm64');assert.equal(process.env.GITHUB_ACTIONS,'true')
@@ -23,11 +30,11 @@ async function run(){
  let mount,nativeDisplay,attached=false
  try{
   const origin=JSON.parse(fs.readFileSync('release/artifact-origin120.json','utf8'));assert.equal(origin.run.id,Number(RUN));assert.equal(origin.run.head_sha,SOURCE);assert.equal(origin.run.event,'workflow_dispatch');assert.equal(origin.run.path,'.github/workflows/mac-build.yml');assert.equal(origin.packageJob.id,112911573153);assert.equal(origin.packageJob.conclusion,'success');assert.equal(origin.artifact.id,11500140550);assert.equal(origin.artifact.digest,'sha256:6a91272060a7a2df607cadc6131f5ccae6d7ec30d915ae75e5c73ec3826e78e9');assert.equal(origin.artifact.name,'mac-packages-arm64');assert.equal(origin.artifact.expired,false);assert.equal(origin.artifact.workflow_run.head_sha,SOURCE);receipt.origin=origin
-  const bytes=fs.readFileSync('release/mac-package-arm64.json'),manifest=verifyManifest(bytes);receipt.manifestSHA256=sha(bytes);receipt.package=manifest
-  for(const asset of ASSETS){const file=path.resolve('release',asset.name);assert.equal(fs.statSync(file).size,asset.bytes);assert.equal(await fileSHA(file),asset.sha256)}save()
+  const originalFiles=originalPackageFiles(),bytes=fs.readFileSync(originalFiles.manifest),manifest=verifyManifest(bytes);receipt.originalFiles=originalFiles;receipt.manifestSHA256=sha(bytes);receipt.package=manifest
+  for(const [index,asset]of ASSETS.entries()){const file=index===0?originalFiles.zip:originalFiles.dmg;assert.equal(fs.statSync(file).size,asset.bytes);assert.equal(await fileSHA(file),asset.sha256)}save()
   let app
-  if(stage==='dmg'){mount=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'KAMUCL retry120 mount ')));execFileSync('hdiutil',['verify','release/'+ASSETS[1].name],{stdio:'inherit'});execFileSync('hdiutil',['attach','release/'+ASSETS[1].name,'-readonly','-nobrowse','-mountpoint',mount],{stdio:'inherit'});attached=true;app=path.join(mount,'KAMUCL.app')}
-  else{const clean=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'KAMUCL retry120 clean ')));execFileSync('ditto',['-x','-k','release/'+ASSETS[0].name,clean]);app=path.join(clean,'KAMUCL.app')}
+  if(stage==='dmg'){mount=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'KAMUCL retry120 mount ')));execFileSync('hdiutil',['verify',originalFiles.dmg],{stdio:'inherit'});execFileSync('hdiutil',['attach',originalFiles.dmg,'-readonly','-nobrowse','-mountpoint',mount],{stdio:'inherit'});attached=true;app=path.join(mount,'KAMUCL.app')}
+  else{const clean=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'KAMUCL retry120 clean ')));execFileSync('ditto',['-x','-k',originalFiles.zip,clean]);app=path.join(clean,'KAMUCL.app')}
   receipt.application=app;receipt.packageIdentity=readMacPackageIdentity(app,{version:'1.1.20',arch:'arm64',sourceCommit:SOURCE,runtimeVersion:'44.3.0',minimumSystemVersion:'13.0.0'});assert.deepEqual(receipt.packageIdentity.identity,manifest.buildIdentity);assert.equal(receipt.packageIdentity.identitySHA256,manifest.buildIdentitySHA256);save()
   nativeDisplay=await require('./mac-native-display113.cjs').prepareNativeDisplay({outputDirectory:output});receipt.nativeDisplayProof=nativeDisplay.proofFile;save()
   execFileSync(process.execPath,['scripts/verify-mac-batch120.cjs',app,'arm64',stage,'--package-source-commit='+SOURCE],{stdio:'inherit',timeout:25*60*1000})
@@ -36,4 +43,4 @@ async function run(){
  finally{if(nativeDisplay)try{await nativeDisplay.restore();receipt.displayRestored=true}catch(error){receipt.complete=false;(receipt.cleanupErrors??=[]).push({stage:'display',message:error.message});process.exitCode=1}if(attached)try{execFileSync('hdiutil',['detach',mount],{stdio:'inherit'});receipt.mountDetached=true}catch(error){receipt.complete=false;(receipt.cleanupErrors??=[]).push({stage:'dmg',message:error.message});process.exitCode=1}receipt.finishedAt=new Date().toISOString();save()}
 }
 if(require.main===module)run().catch(error=>{console.error(error);process.exitCode=1})
-module.exports={SOURCE,RUN,MANIFEST,ASSETS,validateQaPaths,proveReuseSource,verifyManifest}
+module.exports={SOURCE,RUN,MANIFEST,ASSETS,validateQaPaths,proveReuseSource,verifyManifest,originalPackageFiles}
