@@ -6,6 +6,7 @@ module.exports=async h=>{
  const root=path.resolve('out','game118-'+crypto.randomUUID());fs.mkdirSync(root,{recursive:true})
  const games=path.join(root,'games'),trigger=path.join(root,'game');fs.mkdirSync(games)
  const proof={complete:false,version:h.version,root,classification:'Real official 26.3/Fabric native Windows game through production installation, skin apply and launch IPC; test-only client driver enters its actual demo world, observes loaded player GPU texture and captures in-game screenshots. No real user data.',events:[]},save=()=>fs.writeFileSync(path.join(root,'proof.json'),JSON.stringify(proof,null,2))
+ proof.platform=process.platform;if(process.platform==='darwin')proof.classification=proof.classification.replace('native Windows game','native Mac ARM64 game')
  const invoke=(c,...a)=>h.evaluate(`window.kamucl.invoke(${JSON.stringify(c)},...${JSON.stringify(a)})`,120000)
  let gameId,started=false
  const drain=async()=>{const b=await h.evaluate('window.__game118Events.splice(0)');proof.events.push(...b);save();return b}
@@ -21,8 +22,9 @@ module.exports=async h=>{
   const instance=path.join(games,'versions',gameId),metadataFile=path.join(instance,gameId+'.json'),metadata=JSON.parse(fs.readFileSync(metadataFile,'utf8'))
   metadata._gameDir=true;metadata.arguments??={};metadata.arguments.game??=[];metadata.arguments.game.push('--demo');metadata.arguments.jvm??=[];metadata.arguments.jvm.push('-Dkamucl.gameProof='+trigger);fs.writeFileSync(metadataFile,JSON.stringify(metadata))
   const classes=path.join(root,'classes');fs.mkdirSync(classes);const jdk=process.env.JAVA_HOME||'C:/Program Files/Java/jdk-25.0.2',loader=path.join(games,'libraries/net/fabricmc/fabric-loader/0.19.5/fabric-loader-0.19.5.jar')
-  execFileSync(path.join(jdk,'bin/javac.exe'),['--release','17','-cp',loader,'-d',classes,'tests/fixtures/OfflineGameProbe.java'],{windowsHide:true})
-  fs.writeFileSync(path.join(classes,'fabric.mod.json'),JSON.stringify({schemaVersion:1,id:'kamucl_game_proof',version:'1',environment:'client',entrypoints:{client:['kamucltest.OfflineGameProbe']}}));fs.mkdirSync(path.join(instance,'mods'),{recursive:true});execFileSync(path.join(jdk,'bin/jar.exe'),['cf',path.join(instance,'mods/native-proof-only.jar'),'-C',classes,'.'],{windowsHide:true})
+  if(process.platform==='darwin')assert(process.env.JAVA_HOME,'Native Mac game QA requires the configured actual ARM64 JDK')
+  execFileSync(path.join(jdk,process.platform==='win32'?'bin/javac.exe':'bin/javac'),['--release','17','-cp',loader,'-d',classes,'tests/fixtures/OfflineGameProbe.java'],{windowsHide:true})
+  fs.writeFileSync(path.join(classes,'fabric.mod.json'),JSON.stringify({schemaVersion:1,id:'kamucl_game_proof',version:'1',environment:'client',entrypoints:{client:['kamucltest.OfflineGameProbe']}}));fs.mkdirSync(path.join(instance,'mods'),{recursive:true});execFileSync(path.join(jdk,process.platform==='win32'?'bin/jar.exe':'bin/jar'),['cf',path.join(instance,'mods/native-proof-only.jar'),'-C',classes,'.'],{windowsHide:true})
   const bytes=await require('sharp')({create:{width:64,height:64,channels:4,background:'#25b191'}}).png().toBuffer(),skin=path.join(root,'synthetic.png');fs.writeFileSync(skin,bytes);proof.skinSha256=crypto.createHash('sha256').update(bytes).digest('hex')
   const account=await invoke('accounts:addOffline','OfflineNative118');await invoke('skin:offlineApply',skin,'slim',account.id);proof.account={type:account.type,username:account.username,uuid:account.uuid}
   const pack=new Zip(),packFile=path.join(root,'Native-pack118.zip');pack.addFile('pack.mcmeta',Buffer.from(JSON.stringify({pack:{min_format:[97,1],max_format:[97,1],description:'Original empty resource-pack acceptance fixture'}})));pack.writeZip(packFile);const imported=await invoke('defaultPacks:import',[packFile]);assert.equal(imported.length,1);proof.defaultPack={id:imported[0].id}

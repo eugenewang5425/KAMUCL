@@ -4,7 +4,7 @@
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto'), assert = require('node:assert/strict'), AdmZip = require('adm-zip')
 const native = require('./qa-native-window115.cjs')
 module.exports = async function(h) {
-  assert.equal(process.platform, 'win32')
+  assert(['win32','darwin'].includes(process.platform)); const isMac = process.platform === 'darwin'
   const directory = path.resolve('out', 'qa-packs118-' + (process.env.KAMUCL_TEST_THEME || 'black-orange') + '-' + crypto.randomUUID())
   fs.mkdirSync(directory, { recursive: true })
   const proof = { complete: false, version: h.version, theme: process.env.KAMUCL_TEST_THEME, directory, observations: [], screenshots: [], clicks: [], classification: 'Actual owned Windows portable UI, foreground-checked coordinate input and real production ZIP/configuration writes. Private metadata-only client JAR fixtures are never launched. A single synthetic filesystem failure exercises production rollback and the real retry control; no game-screen acceptance.' }
@@ -15,7 +15,10 @@ module.exports = async function(h) {
   const privateRoot = fs.realpathSync.native(h.root)
   for (const dir of [h.profile, h.games]) { const relative = path.relative(privateRoot, fs.realpathSync.native(dir)); assert(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 'Fixture path must be within the driver-owned root') }
   const binding = { pid: identity.pid, windowId: identity.windowId, webContentsId: identity.webContentsId }, koffi = path.resolve('node_modules/koffi')
+  const mac = isMac ? await require('./qa-native-mac120.cjs').create(h,proof,directory,binding) : null
+  proof.platform=process.platform;if(isMac)proof.classification=proof.classification.replace('Windows portable UI','signed Mac package UI')
   const foreground = async () => {
+    if(mac)return mac.observe()
     const state = await h.main(`(${native.observeOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
     assert.equal(state.foreground, state.hwnd); assert.equal(state.foregroundPid, binding.pid)
     assert(state.visible && state.focused && !state.minimized); return state
@@ -58,7 +61,7 @@ module.exports = async function(h) {
   let primary, initialWindow
   try {
     await h.call('Emulation.setFocusEmulationEnabled', { enabled: false })
-    proof.nativeFocus = await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
+    proof.nativeFocus = mac ? await mac.focus() : await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
     await until('actual focus', () => h.evaluate('document.hasFocus()&&!document.hidden'), Boolean)
     initialWindow = await windowState(); proof.initialWindow = initialWindow
     assert.deepEqual(await invoke('defaultPacks:get'), [], 'Packs QA requires fresh disposable global defaults')

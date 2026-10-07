@@ -67,6 +67,8 @@ async function runCommunityChecks(h) {
   const version = '[aria-label="Minecraft 版本"]', keyword = '[data-ui="CommunityView:bc0450fd9c8f"]'
   await nav('community')
   await until('community actual result ready', `(${readCommunityState})()`, state => state.present && state.results.length >= 20 && !state.busy)
+  await click('[data-ui="community:versions-custom"]')
+  await until('explicit custom-version mode exposes the production version input', "document.querySelector('[data-ui=\"community:versions-custom\"]')?.getAttribute('aria-pressed')==='true'&&!!document.querySelector('[aria-label=\"Minecraft 版本\"]')", Boolean)
   await text(keyword, '中文搜索保持116'); await key('Enter', 'Enter', 13)
   await until('searched original keyword', `(${readCommunityState})()`, state => state.keyword === '中文搜索保持116' && state.results.some(row => row.includes('中文搜索保持116')) && !state.busy)
   await text(version, '')

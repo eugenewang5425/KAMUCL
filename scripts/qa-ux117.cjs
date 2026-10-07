@@ -4,18 +4,21 @@ const fs = require('node:fs'), path = require('node:path'), crypto = require('no
 const native = require('./qa-native-window115.cjs'), community = require('./qa-community116.cjs')
 const nativeKey = require('./qa-native-key116.cjs')
 module.exports = async function(h) {
-  assert.equal(process.platform, 'win32')
+  assert(['win32','darwin'].includes(process.platform)); const isMac = process.platform === 'darwin'
   const directory = path.resolve('out', 'qa-ux117-' + process.env.KAMUCL_TEST_THEME + '-' + crypto.randomUUID())
   fs.mkdirSync(directory, { recursive: true })
   const proof = { complete: false, version: h.version, directory, theme: process.env.KAMUCL_TEST_THEME, observations: [], screenshots: [], classification: 'Actual Windows portable UI, foreground-checked coordinate/keyboard input. Synthetic provider/installation responses, not live services. Actual host display unchanged; 1366x768/DPI geometry is separately unit-tested.' }
   const save = () => fs.writeFileSync(path.join(directory, 'live.json'), JSON.stringify(proof, null, 2))
   const identity = await h.main(`(()=>{const fs=process.mainModule.require('node:fs'),windows=testElectron.BrowserWindow.getAllWindows().filter(w=>w.webContents.getURL().includes('/renderer/index.html'));if(windows.length!==1)throw Error('Ambiguous owned renderer');const w=windows[0];return{pid:process.pid,ppid:process.ppid,windowId:w.id,webContentsId:w.webContents.id,profile:fs.realpathSync.native(testElectron.app.getPath('userData')),electron:process.versions.electron,arch:process.arch}})()`)
   assert(identity.pid === h.ownedTrack.pid || identity.ppid === h.ownedTrack.pid)
-  assert.equal(identity.profile, fs.realpathSync.native(h.profile)); assert.equal(identity.arch, 'x64')
+  assert.equal(identity.profile, fs.realpathSync.native(h.profile)); assert.equal(identity.arch, isMac ? 'arm64' : 'x64')
   proof.identity = identity
   const binding = { pid: identity.pid, windowId: identity.windowId, webContentsId: identity.webContentsId }, koffi = path.resolve('node_modules/koffi')
+  const mac = isMac ? await require('./qa-native-mac120.cjs').create(h,proof,directory,binding) : null
+  proof.platform = process.platform; if(isMac)proof.classification = proof.classification.replace('Windows portable','signed Mac package').replace('Actual host display unchanged','Original native display changes and restoration are recorded by the owning Mac driver')
   const state = async () => ({ native: await h.main(`(()=>{const w=testElectron.BrowserWindow.fromId(${identity.windowId});return{bounds:w.getBounds(),content:w.getContentSize(),zoom:w.webContents.getZoomFactor(),maximized:w.isMaximized(),workArea:testElectron.screen.getDisplayMatching(w.getBounds()).workArea}})()`), renderer: await h.evaluate('({width:innerWidth,height:innerHeight,hasFocus:document.hasFocus(),hidden:document.hidden,theme:document.documentElement.dataset.theme})'), settings: await h.evaluate("window.kamucl.invoke('settings:get')") })
   const foreground = async () => {
+    if(mac)return mac.observe()
     const value = await h.main(`(${native.observeOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
     if(value.foreground!==value.hwnd||value.foregroundPid!==binding.pid||!value.visible||!value.focused||value.minimized){proof.foregroundFailure=value;save()}
     assert.equal(value.foreground, value.hwnd); assert.equal(value.foregroundPid, binding.pid); assert(value.visible && value.focused && !value.minimized)
@@ -60,14 +63,14 @@ module.exports = async function(h) {
   const nativeClick = async selector => {
     await h.evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'})`)
     const point=await h.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),r=e.getBoundingClientRect();if(!e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)))throw Error('Native target blocked');return{x:r.x+r.width/2,y:r.y+r.height/2}})()`)
-    await foreground(); const result=await h.main(`(${require('./qa-native-click117.cjs').clickOwned})(${JSON.stringify(binding)},${JSON.stringify(point)},${JSON.stringify(koffi)})`)
+    await foreground(); const result=mac ? await mac.click(point) : await h.main(`(${require('./qa-native-click117.cjs').clickOwned})(${JSON.stringify(binding)},${JSON.stringify(point)},${JSON.stringify(koffi)})`)
     await h.wait(200); await foreground(); return result
   }
   const pose = () => h.evaluate("(()=>{const e=document.querySelector('.preview-3d .viewer3d');return e?.dataset.pose?{...JSON.parse(e.dataset.pose),state:e.dataset.animationState}:null})()")
   let primary
   try {
     await h.call('Emulation.setFocusEmulationEnabled',{enabled:false})
-    proof.nativeFocus=await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
+    proof.nativeFocus=mac ? await mac.focus() : await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
     await until('actual focus',()=>h.evaluate('document.hasFocus()&&!document.hidden'),Boolean)
     proof.initial=await state();assert.equal(proof.initial.settings.rememberGameWindowSize,false)
     const metadataId='1.21.5-Fabric 版本识别验证',metadataDir=path.join(h.games,'versions',metadataId),metadataJson={id:metadataId,_mcVersion:'0.0.0',_loader:'fabric',_loaderVersion:'0.16.12',mainClass:'net.fabricmc.loader.impl.launch.knot.KnotClient',libraries:[]}
@@ -113,7 +116,7 @@ module.exports = async function(h) {
     await h.call('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'no-preference'}]});await click('[data-seg=walk]');await until('walking resumed after reduced media',pose,v=>v?.state==='walk'&&v.flight<.001)
     await h.main(`testElectron.BrowserWindow.fromId(${identity.windowId}).hide();true`);await until('actual owned hidden window',()=>h.evaluate('document.hidden'),Boolean)
     const hiddenA=await pose();await h.wait(400);const hiddenB=await pose();assert.equal(hiddenA.seconds,hiddenB.seconds);proof.hiddenPause={hiddenA,hiddenB}
-    await h.main(`testElectron.BrowserWindow.fromId(${identity.windowId}).show();true`);await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`);await until('visible model resumes',async()=>({ready:await h.evaluate('document.hasFocus()&&!document.hidden'),pose:await pose()}),v=>v.ready&&v.pose?.seconds>hiddenB.seconds)
+    await h.main(`testElectron.BrowserWindow.fromId(${identity.windowId}).show();true`);if(mac)await mac.focus();else await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`);await until('visible model resumes',async()=>({ready:await h.evaluate('document.hasFocus()&&!document.hidden'),pose:await pose()}),v=>v.ready&&v.pose?.seconds>hiddenB.seconds)
     await h.main("uiAccount.type='offline';true");await h.reloadThemeReady('offline-history117');await nav('skins');await click('.history-preview');await until('offline unused preview ready',pose,Boolean)
     proof.offline=await h.evaluate("({selected:document.querySelector('.preview-selection')?.textContent,upload:!!document.querySelector('.skin-operation-panel'),localApply:document.querySelector('.skin-operation-panel')?.textContent.includes('应用到离线账号'),message:document.querySelector('.page-sub')?.textContent})");assert(proof.offline.upload&&proof.offline.localApply&&proof.offline.selected?.includes('尚未使用'));assert.equal(await h.main('__qaSkin117.uploads'),0);await screenshot('offline-history-preview')
     await h.main("uiAccount.type='microsoft';true");await h.reloadThemeReady('restored-account117');await nav('skins')
@@ -130,8 +133,8 @@ module.exports = async function(h) {
     await h.main(`(()=>{const w=testElectron.BrowserWindow.fromId(${identity.windowId});w.setSize(1360,860);w.webContents.setZoomFactor(1);return true})()`)
     proof.resources=[]
     for(const id of ['mods','packs','shaders']){
-      await nav(id);const row=await until('native actual resource path '+id,()=>h.evaluate("(()=>{const e=document.querySelector('.fm-path');return{path:e?.textContent,title:e?.title}})()"),v=>v.path&&v.path.includes('\\'))
-      assert(!row.path.includes('/'));proof.resources.push({id,...row});await screenshot('native-path-'+id)
+      await nav(id);const row=await until('native actual resource path '+id,()=>h.evaluate("(()=>{const e=document.querySelector('.fm-path');return{path:e?.textContent,title:e?.title}})()"),v=>v.path&&v.path.includes(path.sep))
+      assert(!row.path.includes(isMac ? '\\' : '/'));proof.resources.push({id,...row});await screenshot('native-path-'+id)
     }
     await nav('mods');await click('.fm-ver-select')
     proof.select=await until('generic listbox body popup',()=>h.evaluate("(()=>{const e=document.querySelector('.select-menu-float'),r=e?.getBoundingClientRect();return e&&{body:e.parentElement===document.body,top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:innerHeight,width:innerWidth,id:e.id,control:document.querySelector('.fm-ver-select').getAttribute('aria-controls')}})()"),v=>v&&v.body&&v.top>=0&&v.bottom<=v.height&&v.left>=0&&v.right<=v.width&&v.id===v.control)
@@ -139,6 +142,7 @@ module.exports = async function(h) {
     const target={id:'联机验证实例',folder:h.games,gameDir:path.join(h.games,'versions','联机验证实例'),mcVersion:'1.20.1',loader:'fabric',loaderVersion:'0.19.5'}
     proof.communityFixture=await h.main(`(${community.installCommunityFixture})(${JSON.stringify({...binding,profile:identity.profile,target})})`)
     await nav('community');await until('resource cards ready',()=>h.evaluate("document.querySelectorAll('.result-card').length"),v=>v>=20)
+    await click('[data-ui="community:versions-custom"]');await until('explicit custom-version mode exposes production version input',()=>h.evaluate("document.querySelector('[data-ui=\"community:versions-custom\"]')?.getAttribute('aria-pressed')==='true'&&!!document.querySelector('[aria-label=\"Minecraft 版本\"]')"),Boolean)
     for(const config of [{width:1360,height:860,zoom:1},{width:960,height:620,zoom:1.25}]){
       await h.main(`(()=>{const w=testElectron.BrowserWindow.fromId(${identity.windowId});w.setSize(${config.width},${config.height});w.webContents.setZoomFactor(${config.zoom});return true})()`)
       await until('actual community viewport '+config.width+' '+config.zoom,state,v=>v.native.zoom===config.zoom&&Math.abs(v.native.bounds.width-config.width)<=3&&Math.abs(v.native.bounds.height-config.height)<=3&&Math.abs(v.renderer.width-v.native.content[0]/config.zoom)<1&&Math.abs(v.renderer.height-v.native.content[1]/config.zoom)<1)
