@@ -294,6 +294,10 @@ jobs:
         run: defaults write com.apple.universalaccess reduceTransparency -bool false
       - name: Reject foreign or reused game PIDs and retain original diagnostic failures
         run: node --test scripts/mac-owned-game-diagnostic113-tests.cjs
+      - name: Observe accelerated NSGL formats in this same native game session
+        # Diagnostic execution cannot skip or qualify the unchanged world test.
+        continue-on-error: true
+        run: node scripts/verify-mac-opengl120.cjs out/mac-opengl-capability120-${{ matrix.stage }}
       - name: Real two-source favorites, version-install UI, SHA1 readback, game world and restart
         run: node scripts/verify-mac-job.cjs favorites arm64 ${{ matrix.stage }}
       - uses: actions/upload-artifact@v4
@@ -303,6 +307,8 @@ jobs:
           path: |
             release/favorites-proof-*
             release/mac-job-*
+            out/mac-opengl-capability120-${{ matrix.stage }}/*.json
+            out/mac-opengl-capability120-${{ matrix.stage }}/*.log
           if-no-files-found: error
 
   batch120:
