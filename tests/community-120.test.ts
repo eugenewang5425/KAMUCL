@@ -151,6 +151,136 @@ test('all-source pagination retries a partial Chinese count after service recove
   assert(requests.slice(index).some(url => url.pathname.startsWith('/v2') && url.searchParams.get('query') === '钠'), 'Recovered Chinese metadata must be queried, rather than a cached partial count')
 })
 
+const isMrRequest = (url: URL) => url.hostname === 'api.modrinth.com' || url.pathname.includes('/modrinth/v2')
+function providerRows(mr: boolean, total: number, offset: number, limit: number) {
+  const rows = Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) => mr
+    ? { project_id: 'mr' + (offset + i), slug: 'mr' + (offset + i), title: 'Synthetic MR ' + (offset + i) }
+    : { id: 333 + offset + i, slug: 'cf' + (333 + offset + i), name: 'Synthetic CF ' + (offset + i) })
+  return Response.json(mr ? { hits: rows, total_hits: total } : { data: rows, pagination: { totalCount: total } })
+}
+
+test('merged counts invalidate prior healthy data on refresh failure and recover every source without duplicate pagination', async t => {
+  let outage = false
+  const requests: URL[] = []
+  const runtime = await fixture(t, async input => {
+    const url = new URL(String(input)), mr = isMrRequest(url); requests.push(url)
+    if (mr && outage) return new Response('synthetic primary and mirror outage', { status: 503 })
+    return providerRows(mr, mr ? 2 : 1, Number(url.searchParams.get(mr ? 'offset' : 'index')), Number(url.searchParams.get(mr ? 'limit' : 'pageSize')))
+  })
+  const q: CommunityQuery = { keyword: 'generic-resource120', source: 'all', kind: 'mod', offset: 0, limit: 1 }
+  assert.equal((await runtime.communitySearchPage(q)).total, 3)
+  outage = true
+  const refreshed = await runtime.communitySearchPage(q)
+  assert.equal(refreshed.total, 1); assert.equal(refreshed.items[0].source, 'curseforge'); assert(refreshed.warnings?.some(w => w.includes('Modrinth 暂不可用')))
+  const start = requests.length
+  for (const offset of [1, 2]) {
+    const page = await runtime.communitySearchPage({ ...q, offset })
+    assert.equal(page.total, 1); assert.deepEqual(page.items, []); assert(page.warnings?.some(w => w.includes('Modrinth 暂不可用')))
+  }
+  assert(requests.slice(start).some(url => isMrRequest(url) && url.searchParams.get('offset') === '0'), 'Failure must remove the earlier healthy count, including mirror failure')
+  outage = false
+  const all: string[] = []
+  // Recovery on a non-first page must also read the invalidated source count.
+  assert.equal((await runtime.communitySearchPage({ ...q, offset: 1 })).total, 3)
+  for (let offset = 0; offset < 3; offset++) {
+    const page = await runtime.communitySearchPage({ ...q, offset })
+    assert.equal(page.total, 3); assert.deepEqual(page.warnings, [])
+    all.push(...page.items.map(item => item.source + ':' + item.projectId))
+  }
+  assert.deepEqual(all, ['modrinth:mr0', 'curseforge:333', 'modrinth:mr1']); assert.equal(new Set(all).size, 3)
+})
+
+test('a source failing after healthy counts preserves the other source, replans its exact range and invalidates the failed count', async t => {
+  let outage = true
+  const requests: URL[] = []
+  const runtime = await fixture(t, async input => {
+    const url = new URL(String(input)), mr = isMrRequest(url), offset = Number(url.searchParams.get(mr ? 'offset' : 'index')); requests.push(url)
+    if (mr && outage && offset > 0) return new Response('synthetic data page outage', { status: 503 })
+    return providerRows(mr, 8, offset, Number(url.searchParams.get(mr ? 'limit' : 'pageSize')))
+  })
+  const q: CommunityQuery = { keyword: 'data-page120', source: 'all', kind: 'mod', offset: 4, limit: 4 }
+  const first = await runtime.communitySearchPage(q)
+  assert.equal(first.total, 8); assert.deepEqual(first.items.map(item => item.projectId), ['337', '338', '339', '340'])
+  assert(first.warnings?.some(w => w.includes('Modrinth 结果读取失败')))
+  const cfOffsets = requests.filter(url => !isMrRequest(url)).map(url => url.searchParams.get('index'))
+  assert.deepEqual(cfOffsets, ['0', '2', '4'], 'A successful old mixed range 2..3 cannot fill the replanned single-source range 4..7')
+  const start = requests.length
+  await runtime.communitySearchPage(q)
+  assert(requests.slice(start).some(url => isMrRequest(url) && url.searchParams.get('offset') === '0'), 'A page failure must invalidate its observed healthy count')
+  outage = false
+  const recovered = await runtime.communitySearchPage(q)
+  assert.equal(recovered.total, 16); assert.deepEqual(recovered.items.map(item => item.source + ':' + item.projectId), ['modrinth:mr2', 'curseforge:335', 'modrinth:mr3', 'curseforge:336'])
+  assert.deepEqual(recovered.warnings, [])
+})
+
+test('concurrent count responses cannot revive invalidated healthy data or erase a newer successful refresh', async t => {
+  for (const [oldFailure, newFailure] of [[false, true], [true, false], [false, false]]) {
+    let first = true, oldMirrorFails = false
+    let release!: (response: Response) => void, started!: () => void
+    const pending = new Promise<Response>(resolve => { release = resolve }), observed = new Promise<void>(resolve => { started = resolve })
+    const requests: URL[] = []
+    const runtime = await fixture(t, async input => {
+      const url = new URL(String(input)), mr = isMrRequest(url); requests.push(url)
+      if (mr && first) { first = false; started(); return pending }
+      if (mr && (newFailure || oldMirrorFails && url.pathname.includes('/modrinth/v2'))) return new Response('synthetic old/new provider failure', { status: 503 })
+      return providerRows(mr, mr ? 3 : 1, Number(url.searchParams.get(mr ? 'offset' : 'index')), Number(url.searchParams.get(mr ? 'limit' : 'pageSize')))
+    })
+    const q: CommunityQuery = { keyword: 'concurrent120-' + oldFailure + '-' + newFailure, source: 'all', kind: 'mod', offset: 0, limit: 1 }
+    const older = runtime.communitySearchPage(q)
+    await observed
+    try {
+      const newer = await runtime.communitySearchPage(q)
+      assert.equal(newer.total, newFailure ? 1 : 4)
+      oldMirrorFails = oldFailure
+      release(oldFailure ? new Response('synthetic delayed old failure', { status: 503 }) : providerRows(true, 2, 0, 1))
+      await older
+      const start = requests.length, next = await runtime.communitySearchPage({ ...q, offset: newFailure ? 1 : 3 })
+      assert.equal(next.total, newFailure ? 1 : 4)
+      assert.deepEqual(next.items.map(item => item.projectId), newFailure ? [] : ['mr2'])
+      const countReads = requests.slice(start).filter(url => isMrRequest(url) && url.searchParams.get('offset') === '0')
+      assert.equal(countReads.length > 0, newFailure, 'Late old success must not refill a failed cache; late old failure must not delete a newer healthy count')
+      assert.equal(next.warnings?.some(w => w.includes('Modrinth 暂不可用')), newFailure)
+    } finally { release(providerRows(true, 2, 0, 1)); await older.catch(() => undefined) }
+  }
+})
+
+test('a delayed older data-page failure cannot invalidate a newer healthy count revision', async t => {
+  let reads = 0, oldMirrorFails = false
+  let release!: (response: Response) => void, started!: () => void
+  const pending = new Promise<Response>(resolve => { release = resolve }), observed = new Promise<void>(resolve => { started = resolve })
+  const requests: URL[] = []
+  const runtime = await fixture(t, async input => {
+    const url = new URL(String(input)), mr = isMrRequest(url); requests.push(url)
+    if (mr && ++reads === 2) { started(); return pending }
+    if (mr && oldMirrorFails && url.pathname.includes('/modrinth/v2')) return new Response('synthetic delayed old data failure', { status: 503 })
+    return providerRows(mr, mr ? (reads === 1 ? 2 : 3) : 1, Number(url.searchParams.get(mr ? 'offset' : 'index')), Number(url.searchParams.get(mr ? 'limit' : 'pageSize')))
+  })
+  const q: CommunityQuery = { keyword: 'old-page-failure120', source: 'all', kind: 'mod', offset: 0, limit: 1 }
+  const older = runtime.communitySearchPage(q)
+  await observed
+  try {
+    assert.equal((await runtime.communitySearchPage(q)).total, 4)
+    oldMirrorFails = true; release(new Response('synthetic older data-page failure', { status: 503 }))
+    const previous = await older
+    assert.equal(previous.total, 1); assert.equal(previous.items[0].source, 'curseforge'); assert(previous.warnings?.some(w => w.includes('Modrinth 结果读取失败')))
+    const start = requests.length, newerPage = await runtime.communitySearchPage({ ...q, offset: 3 })
+    assert.equal(newerPage.total, 4); assert.deepEqual(newerPage.items.map(item => item.projectId), ['mr2'])
+    assert.deepEqual(newerPage.warnings, [])
+    assert(!requests.slice(start).some(url => isMrRequest(url) && url.searchParams.get('offset') === '0'), 'An old failed page cannot delete the newer healthy cache')
+  } finally { release(providerRows(true, 2, 0, 1)); await older.catch(() => undefined) }
+})
+
+test('both data sources failing after their counts succeeded remains an explicit failure', async t => {
+  const seen = new Set<boolean>()
+  const runtime = await fixture(t, async input => {
+    const url = new URL(String(input)), mr = isMrRequest(url)
+    if (seen.has(mr)) return new Response('synthetic data-page outage', { status: 503 })
+    seen.add(mr)
+    return providerRows(mr, mr ? 2 : 1, 0, 1)
+  })
+  await assert.rejects(runtime.communitySearchPage({ keyword: 'both-data-pages120', source: 'all', kind: 'mod', offset: 0, limit: 20 }), /503/)
+})
+
 test('known local alias with a different repository slug falls back to explicit MC百科 source identity, never a search first-hit', async t => {
   const runtime = await fixture(t, async input => {
     const u = new URL(String(input))
