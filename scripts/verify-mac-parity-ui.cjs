@@ -90,6 +90,14 @@ function readMountedInstallInput(){
  // actual reactive props, preserving every original field without setters.
  return JSON.parse(JSON.stringify({file:p.input.file,target:p.target}))
 }
+function assertActualCommitTrace(call,plan,prepareOperationId,progress){
+ assert.equal(call.channel,'mods:commit');assert(!call.error);assert.equal(call.arguments.length,3)
+ const operationId=call.arguments[2];assert.match(operationId,/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);assert.notEqual(operationId,prepareOperationId,'commit has its own original operation')
+ const events=progress.filter(row=>row.value.operationId===operationId);assert(events.length,'original production progress must correlate to the actual commit operation')
+ assert(events.every(row=>row.receivedAt>=call.startedAt&&row.value.taskTitle==='安装 MOD 与前置依赖'&&typeof row.value.taskId==='string'&&row.value.taskId));assert.equal(new Set(events.map(row=>row.value.taskId)).size,1)
+ assert(events.some(row=>row.value.stage==='mod-verify'),'original initial commit progress required');assert.deepEqual(call.arguments,[plan.id,true,events[0].value.operationId])
+ return{operationId,taskId:events[0].value.taskId,progress:events}
+}
 // Chromium may perform a microtask checkpoint between separate native event
 // listeners. Bind both observations to the original Event and read only after
 // its target handler has run, in the document's real bubbling phase.
@@ -211,6 +219,20 @@ async function collectAndRestoreInstallObserver(main,receipt){
  if(traceError)throw traceError
  return restored
 }
+async function collectAndRestoreCommitObservation(evaluate,main,receipt){
+ let progressReadError,progressRestoreError,installRestoreError,restored
+ try{receipt.originalCommitProgress=await evaluate('window.__macParityCommitProgress?.rows||[]')}
+ catch(error){progressReadError=error;receipt.progressReadError={name:error.name,message:error.message}}
+ // The trace read is diagnostic. Always remove the actual renderer listener,
+ // then restore exact main handlers, even if either separate transport rejects.
+ try{receipt.progressObserverRestoration=await evaluate("(()=>{const o=window.__macParityCommitProgress;if(o){o.off();delete window.__macParityCommitProgress}return{complete:true,wasInstalled:!!o}})()")}
+ catch(error){progressRestoreError=error;receipt.progressObserverRestorationError={name:error.name,message:error.message}}
+ try{restored=await collectAndRestoreInstallObserver(main,receipt)}catch(error){installRestoreError=error}
+ if(installRestoreError)throw installRestoreError
+ if(progressRestoreError)throw progressRestoreError
+ if(progressReadError)throw progressReadError
+ return restored
+}
 function preservePrimaryFailure(proof,error,save){
  proof.error={name:error.name,message:error.message}
  try{save()}catch(diagnosticError){(proof.diagnosticErrors??=[]).push({stage:'primary failure receipt',name:diagnosticError.name,message:diagnosticError.message})}
@@ -228,8 +250,22 @@ function assertParityTrustedTarget(trace,expected){
   assert(Number.isFinite(row.at)&&Number.isFinite(row.x)&&Number.isFinite(row.y));assert(row.target&&typeof row.target.tag==='string')
  }
 }
-function createParityCoordinate({call,evaluate,native,wait,identity,documentBinding,proof,save,now=()=>performance.now(),geometry=require('./qa-coordinate-geometry114.cjs')}){
+function assertParityPointerDismissal(trace,expected){
+ assert.equal(expected.selector,'[data-ui="App:32e6a4482be2"]','Only the actual download backdrop uses this pointerdown dismissal contract')
+ assert.equal(trace.selector,expected.selector);assert.equal(trace.token,expected.token);assert.equal(trace.timeOrigin,expected.timeOrigin);assert.equal(trace.url,expected.url);assert.equal(trace.overflow,false)
+ assert.deepEqual(trace.records.map(row=>row.type),['pointerdown','mousedown','pointerup','mouseup'],'Original native down/up sequence must remain complete after the pointerdown target is unmounted')
+ const down=trace.records[0];assert.equal(down.matchesSelector,true);assert.equal(down.target.tag,'DIV');assert.equal(down.target.ui,'App:32e6a4482be2')
+ for(const row of trace.records){assert.equal(row.isTrusted,true);assert.equal(row.timeOrigin,expected.timeOrigin);assert.equal(row.url,expected.url);assert.equal(row.renderer.hasFocus,true);assert.equal(row.renderer.hidden,false);assert(Number.isFinite(row.at)&&Number.isFinite(row.x)&&Number.isFinite(row.y));assert.equal(row.x,down.x);assert.equal(row.y,down.y)}
+ return true
+}
+function assertPointerDismissNative(value,reference,identity){
+ for(const key of ['pid','windowId','webContentsId'])assert.equal(value[key],identity[key])
+ assert(value.visible&&value.focused&&!value.minimized&&!value.appHidden);assert.equal(value.frontmostPID,identity.pid);assert(reference.window?.id>0);assert.equal(value.window?.id,reference.window.id,'Actual native CGWindow must stay the same throughout dismissal')
+ for(const key of ['x','y','width','height'])for(const name of ['bounds','contentBounds'])assert.equal(value[name][key],reference[name][key]);assert.equal(value.zoom,reference.zoom)
+}
+function createParityCoordinate({call,evaluate,native,wait,identity,documentBinding,proof,save,now=()=>performance.now(),pointerDismissal=false,geometry=require('./qa-coordinate-geometry114.cjs')}){
  return async(selector,{expectedLayout,deadline,absentSelectors=selector.startsWith('.download-modal')?['.download-modal .files-loading']:[]}={})=>{
+  if(pointerDismissal)assert.equal(selector,'[data-ui="App:32e6a4482be2"]')
   // Capture this call's document before any asynchronous operation. A later
   // explicit reload may bind the next call, never this call or its old samples.
   const boundDocument={...(typeof documentBinding==='function'?documentBinding():documentBinding)}
@@ -250,10 +286,13 @@ function createParityCoordinate({call,evaluate,native,wait,identity,documentBind
    assert(now()<end,'Original coordinate deadline elapsed before trusted-target observation')
    token=await evaluate(geometry.trustedTargetStartExpression(selector),remaining());operation.token=token;save()
    const point=observed.coordinate
+   if(pointerDismissal){assertPointerDismissNative(observed.native,observed.native,identity);operation.trigger='pointerdown dismissal';operation.nativeSequence=[];assert.equal(await evaluate("!!document.querySelector('.dl-panel')",remaining()),true,'Actual download panel must exist before its backdrop dismissal')}
    for(const[type,buttons]of[['mouseMoved',0],['mousePressed',1],['mouseReleased',0]]){
     assert(now()<end,'Original coordinate deadline elapsed before input dispatch')
+    if(pointerDismissal){const actual=await native(identity,remaining());assertPointerDismissNative(actual,observed.native,identity);operation.nativeSequence.push({type,phase:'before',at:now(),actual});save()}
     const input={type,x:point.x,y:point.y,button:type==='mouseMoved'?'none':'left',buttons,clickCount:type==='mouseMoved'?0:1}
     proof.inputEvents.push({method:'Input.dispatchMouseEvent',parameters:input,at:now()});save();await call('Input.dispatchMouseEvent',input,remaining())
+    if(pointerDismissal){const actual=await native(identity,remaining());assertPointerDismissNative(actual,observed.native,identity);operation.nativeSequence.push({type,phase:'after',at:now(),actual});if(type==='mousePressed'){operation.actualDismissal=await evaluate("({panel:!!document.querySelector('.dl-panel'),backdrop:!!document.querySelector('[data-ui=\"App:32e6a4482be2\"]'),timeOrigin:performance.timeOrigin,url:location.href})",remaining());assert.equal(operation.actualDismissal.panel,false,'Production pointerdown must actually remove the download panel');assert.equal(operation.actualDismissal.backdrop,false);assert.equal(operation.actualDismissal.timeOrigin,boundDocument.timeOrigin);assert.equal(operation.actualDismissal.url,boundDocument.url)}save()}
     assert(now()<end,'Original coordinate deadline elapsed during input dispatch')
    }
    operation.observed=observed;operation.complete=true;return point
@@ -261,7 +300,7 @@ function createParityCoordinate({call,evaluate,native,wait,identity,documentBind
   finally{
    if(token!==undefined)try{
     operation.trustedTargets=await evaluate(geometry.trustedTargetStopExpression(token),remaining())
-    assertParityTrustedTarget(operation.trustedTargets,{selector,token,...boundDocument})
+    if(pointerDismissal)assertParityPointerDismissal(operation.trustedTargets,{selector,token,...boundDocument});else assertParityTrustedTarget(operation.trustedTargets,{selector,token,...boundDocument})
     assert(now()<end,'Original coordinate deadline elapsed during trusted-target observation')
    }catch(error){operation.complete=false;operation.trustedTargetError={name:error.name,message:error.message};if(!primaryError)throw error}
    finally{save()}
@@ -473,6 +512,7 @@ module.exports=async function verifyMacParity(h){
    // substituting network, dependency, compatibility or download responses.
    proof.realService.handlerRegistration=await main(`(()=>{globalThis.macParityInstallTrace=(${createInstallHandlerObserver.toString()})(testElectron.ipcMain,['community:files','mods:prepare','mods:commit']);return macParityInstallTrace.registration})()`)
    await preserveInstallObservation(async()=>{
+   await evaluate("(()=>{if(window.__macParityCommitProgress)throw Error('Existing original progress observer');const rows=[],off=window.kamucl.on('event:progress',value=>rows.push({receivedAt:Date.now(),value}));window.__macParityCommitProgress={rows,off};return true})()")
    save()
    await type('.download-modal input[list="mod-minecraft-versions"]','1.20.1')
    await until('actual entered Minecraft filter',()=>evaluate(`document.querySelector('.download-modal input[list="mod-minecraft-versions"]')?.value`),value=>value==='1.20.1')
@@ -516,10 +556,11 @@ module.exports=async function verifyMacParity(h){
    const installed=path.join(games,'versions','联机验证实例','mods',chosen.file.fileName),stats=fs.statSync(installed)
    const bytes=fs.readFileSync(installed),actualSHA1=crypto.createHash('sha1').update(bytes).digest('hex')
    assert.equal(actualSHA1,chosen.file.sha1);assert.equal(stats.size,chosen.file.size)
-   const observedCommit=await main(`macParityInstallTrace.calls.filter(c=>c.channel==='mods:commit'&&c.completedAt)`);assert.equal(observedCommit.length,1);assert(!observedCommit[0].error);assert.deepEqual(observedCommit[0].arguments,[plan.id,true])
+   const observedCommit=await main(`macParityInstallTrace.calls.filter(c=>c.channel==='mods:commit'&&c.completedAt)`);assert.equal(observedCommit.length,1)
+   proof.realService.commitOperation=assertActualCommitTrace(observedCommit[0],plan,observedPlan[0].arguments[2],await evaluate('window.__macParityCommitProgress.rows'));save()
    proof.realService.installed={relative:path.relative(games,installed),bytes:stats.size,sha1:actualSHA1,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),declaredSHA1:chosen.file.sha1,target:plan.target};proof.realService.complete=true
    await screenshot('mac-parity-first-real-install-complete')
-   },()=>collectAndRestoreInstallObserver(main,proof.realService),proof.realService,save)
+   },()=>collectAndRestoreCommitObservation(evaluate,main,proof.realService),proof.realService,save)
    const finalSettings=await evaluate("window.kamucl.invoke('settings:get')")
    proof.persisted={accounts:(await accounts()).map(publicAccount),selected:publicAccount(await selected()),mascots:await state(),favorites:await evaluate("window.kamucl.invoke('mods:favorites')"),theme:finalSettings.theme,settingsSHA256:stableHash(finalSettings)}
    assert.equal(proof.persisted.accounts.length,2);assert.equal(proof.persisted.theme,'black-orange')
@@ -529,4 +570,4 @@ module.exports=async function verifyMacParity(h){
  finally{try{proof.trustedTargetObserverRestoration=await evaluate(require('./qa-coordinate-geometry114.cjs').trustedTargetRestoreExpression());save();assert.equal(proof.trustedTargetObserverRestoration.complete,true)}catch(error){proof.complete=false;proof.trustedTargetRestorationError={name:error.name,message:error.message};save();if(!proof.error){preservePrimaryFailure(proof,error,save);throw error}}}
 }
 async function coordinatePosition(evaluate,selector){return evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;if(!e.contains(document.elementFromPoint(x,y)))throw Error('actual queue hit target obscured');return{x,y}})()`)}
-Object.assign(module.exports,{ROUTES,THEMES,LAYOUTS,ROUTE_COMPONENTS,assertEditableNativeTextInput,nativeInputLayoutReady,nativeNavigationLayoutReady,assertNavigationCoverage,assertQueueLedger,publicAccount,stableHash,installMacParityObserver,readDownloadSelectionState,assertMatchingDownloadResponse,assertDownloadTargetSelection,readMountedInstallInput,createQueueClickObserver,createInstallHandlerObserver,restoreInstallHandlerObserver,preserveInstallObservation,collectAndRestoreInstallObserver,preservePrimaryFailure,assertParityTrustedTarget,createParityCoordinate,parityReloadReady,createParityReload})
+Object.assign(module.exports,{ROUTES,THEMES,LAYOUTS,ROUTE_COMPONENTS,assertEditableNativeTextInput,nativeInputLayoutReady,nativeNavigationLayoutReady,assertNavigationCoverage,assertQueueLedger,publicAccount,stableHash,installMacParityObserver,readDownloadSelectionState,assertMatchingDownloadResponse,assertDownloadTargetSelection,readMountedInstallInput,assertActualCommitTrace,createQueueClickObserver,createInstallHandlerObserver,restoreInstallHandlerObserver,preserveInstallObservation,collectAndRestoreInstallObserver,collectAndRestoreCommitObservation,preservePrimaryFailure,assertParityTrustedTarget,assertParityPointerDismissal,assertPointerDismissNative,createParityCoordinate,parityReloadReady,createParityReload})

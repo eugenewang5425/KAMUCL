@@ -93,7 +93,7 @@ async function run(){
    row.identity={pid:binding.pid,windowId:binding.windowId,webContentsId:binding.webContentsId};row.documentBinding=await evaluate('({timeOrigin:performance.timeOrigin,url:location.href})')
    const foreground=async()=>{const actual=await observedNative();assert(actual.visible&&actual.focused&&!actual.minimized&&!actual.appHidden);return actual}
    const coordinate=coordinates.createParityCoordinate({call,evaluate,native:observedNative,wait,identity:row.identity,documentBinding:()=>row.documentBinding,proof:row,save})
-   const backdropCoordinate=coordinates.createParityCoordinate({call,evaluate,native:observedNative,wait,identity:row.identity,documentBinding:()=>row.documentBinding,proof:row,save,geometry:{...require('./qa-coordinate-geometry114.cjs'),coordinateExpression:backdropExpression,waitForStableCoordinate:waitForBackdrop}})
+   const backdropCoordinate=coordinates.createParityCoordinate({call,evaluate,native:observedNative,wait,identity:row.identity,documentBinding:()=>row.documentBinding,proof:row,save,pointerDismissal:true,geometry:{...require('./qa-coordinate-geometry114.cjs'),coordinateExpression:backdropExpression,waitForStableCoordinate:waitForBackdrop}})
    const click=(selector,options)=>coordinate(selector,options)
    const nav=async id=>{await click(`[data-nav=${id}]`);const component=coordinates.ROUTE_COMPONENTS[id];assert(component,'Unknown native QA route');await until('actual route '+id,`window.__macParityObserver.route(${JSON.stringify(component)}).component`,value=>value===component);await foreground()}
    const screenshot=async label=>{

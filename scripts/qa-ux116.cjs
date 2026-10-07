@@ -4,18 +4,21 @@ const fs = require('node:fs'), path = require('node:path'), crypto = require('no
 const native = require('./qa-native-window115.cjs'), community = require('./qa-community116.cjs')
 const nativeKey = require('./qa-native-key116.cjs')
 module.exports = async function(h) {
-  assert.equal(process.platform, 'win32')
+  assert(['win32','darwin'].includes(process.platform)); const isMac = process.platform === 'darwin'
   const directory = path.resolve('out', 'qa-ux116-' + process.env.KAMUCL_TEST_THEME + '-' + crypto.randomUUID())
   fs.mkdirSync(directory, { recursive: true })
   const proof = { complete: false, version: h.version, directory, theme: process.env.KAMUCL_TEST_THEME, observations: [], screenshots: [], classification: 'Actual Windows portable UI, foreground-checked coordinate/keyboard input. Synthetic provider/installation responses, not live services. Actual host display unchanged; 1366x768/DPI geometry is separately unit-tested.' }
   const save = () => fs.writeFileSync(path.join(directory, 'live.json'), JSON.stringify(proof, null, 2))
   const identity = await h.main(`(()=>{const fs=process.mainModule.require('node:fs'),windows=testElectron.BrowserWindow.getAllWindows().filter(w=>w.webContents.getURL().includes('/renderer/index.html'));if(windows.length!==1)throw Error('Ambiguous owned renderer');const w=windows[0];return{pid:process.pid,ppid:process.ppid,windowId:w.id,webContentsId:w.webContents.id,profile:fs.realpathSync.native(testElectron.app.getPath('userData')),electron:process.versions.electron,arch:process.arch}})()`)
   assert(identity.pid === h.ownedTrack.pid || identity.ppid === h.ownedTrack.pid)
-  assert.equal(identity.profile, fs.realpathSync.native(h.profile)); assert.equal(identity.arch, 'x64')
+  assert.equal(identity.profile, fs.realpathSync.native(h.profile)); assert.equal(identity.arch, isMac ? 'arm64' : 'x64')
   proof.identity = identity
   const binding = { pid: identity.pid, windowId: identity.windowId, webContentsId: identity.webContentsId }, koffi = path.resolve('node_modules/koffi')
+  const mac = isMac ? await require('./qa-native-mac120.cjs').create(h,proof,directory,binding) : null
+  proof.platform = process.platform; if(isMac)proof.classification = proof.classification.replace('Windows portable','signed Mac package').replace('Actual host display unchanged','Original native display changes and restoration are recorded by the owning Mac driver')
   const state = async () => ({ native: await h.main(`(()=>{const w=testElectron.BrowserWindow.fromId(${identity.windowId});return{bounds:w.getBounds(),content:w.getContentSize(),zoom:w.webContents.getZoomFactor(),maximized:w.isMaximized(),workArea:testElectron.screen.getDisplayMatching(w.getBounds()).workArea}})()`), renderer: await h.evaluate('({width:innerWidth,height:innerHeight,hasFocus:document.hasFocus(),hidden:document.hidden,theme:document.documentElement.dataset.theme})'), settings: await h.evaluate("window.kamucl.invoke('settings:get')") })
   const foreground = async () => {
+    if(mac)return mac.observe()
     const value = await h.main(`(${native.observeOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
     assert.equal(value.foreground, value.hwnd); assert.equal(value.foregroundPid, binding.pid); assert(value.visible && value.focused && !value.minimized)
     return value
@@ -52,7 +55,7 @@ module.exports = async function(h) {
   let primary
   try {
     await h.call('Emulation.setFocusEmulationEnabled', { enabled: false })
-    proof.nativeFocus = await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
+    proof.nativeFocus = mac ? await mac.focus() : await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
     await until('actual focus', () => h.evaluate('document.hasFocus()&&!document.hidden'), Boolean)
     const before = await state(); assert.equal(before.settings.uiWindowAutoFit, false); assert.equal(before.native.zoom, 1); proof.defaultOff = before
     await nav('settings'); await click('[data-section="ui-window-fit"] label.switch')
@@ -72,9 +75,10 @@ module.exports = async function(h) {
     await nav('home'); await screenshot('adaptive-minimum-home')
     proof.keyboardBefore = await state()
     await h.main(`(()=>{const wc=testElectron.BrowserWindow.fromId(${identity.windowId}).webContents;globalThis.__qaKey116={events:[],wc};__qaKey116.observer=(event,input)=>{if(input.key==='-'||input.key==='0')__qaKey116.events.push({type:input.type,key:input.key,control:input.control,meta:input.meta,alt:input.alt,zoom:wc.getZoomFactor(),at:Date.now()})};wc.on('before-input-event',__qaKey116.observer);return true})()`)
-    proof.nativeMinusInput=await h.main(`(${nativeKey.sendOwnedZoomKey})(${JSON.stringify(binding)},189,${JSON.stringify(koffi)})`);await h.wait(200)
+    proof.nativeMinusInput=mac ? await mac.zoomKey('-') : await h.main(`(${nativeKey.sendOwnedZoomKey})(${JSON.stringify(binding)},189,${JSON.stringify(koffi)})`);await h.wait(200)
     const minus = await state(); proof.keyboardAfterMinus=minus;proof.keyboardEvents=await h.main('__qaKey116.events');save();assert(Math.abs(minus.native.zoom - proof.keyboardBefore.native.zoom/1.1) < .0001)
-    proof.nativeResetInput=await h.main(`(${nativeKey.sendOwnedZoomKey})(${JSON.stringify(binding)},48,${JSON.stringify(koffi)})`);await h.wait(200); assert(Math.abs((await state()).native.zoom - small.native.zoom) < .0001)
+    proof.nativeResetInput=mac ? await mac.zoomKey('0') : await h.main(`(${nativeKey.sendOwnedZoomKey})(${JSON.stringify(binding)},48,${JSON.stringify(koffi)})`);await h.wait(200); assert(Math.abs((await state()).native.zoom - small.native.zoom) < .0001)
+    if(mac){proof.keyboardEvents=await h.main('__qaKey116.events');for(const key of ['-','0'])for(const type of ['keyDown','keyUp'])assert(proof.keyboardEvents.some(e=>e.key===key&&e.type===type&&e.meta===true&&e.control===false),'Actual owned before-input-event must receive native CmdOrCtrl '+key+' '+type)}
     proof.keyboardZoom = { minus: minus.native.zoom, restored: (await state()).native.zoom }
     proof.recording = await h.recordScreencast('ux116-minimum-' + crypto.randomUUID(), async () => { await foreground(); await nav('settings'); await nav('home') }, 1500)
     await h.main(`(()=>{const w=testElectron.BrowserWindow.fromId(${identity.windowId});w.maximize();return true})()`)

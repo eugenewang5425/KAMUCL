@@ -4,7 +4,7 @@
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto'), assert = require('node:assert/strict')
 const native = require('./qa-native-window115.cjs')
 module.exports = async function(h) {
-  assert.equal(process.platform, 'win32')
+  assert(['win32','darwin'].includes(process.platform)); const isMac = process.platform === 'darwin'
   const directory = path.resolve('out', 'qa-offline118-' + (process.env.KAMUCL_TEST_THEME || 'black-orange') + '-' + crypto.randomUUID())
   fs.mkdirSync(directory, { recursive: true })
   const proof = { complete: false, version: h.version, theme: process.env.KAMUCL_TEST_THEME, directory, observations: [], screenshots: [], classification: 'Actual owned Windows UI coordinate and keyboard input; genuine production PNG decoding and account-scoped disk storage. Deferred reply is an isolated scheduling fixture. No game launch or game-screen acceptance.' }
@@ -13,7 +13,10 @@ module.exports = async function(h) {
   assert(identity.pid === h.ownedTrack.pid || identity.ppid === h.ownedTrack.pid)
   assert.equal(identity.profile, fs.realpathSync.native(h.profile)); proof.identity = identity
   const binding = { pid: identity.pid, windowId: identity.windowId, webContentsId: identity.webContentsId }, koffi = path.resolve('node_modules/koffi')
+  const mac = isMac ? await require('./qa-native-mac120.cjs').create(h,proof,directory,binding) : null
+  proof.platform=process.platform;if(isMac)proof.classification=proof.classification.replace('Windows UI','signed Mac package UI')
   const foreground = async () => {
+    if(mac){const state=await mac.observe();proof.nativeFocusObservations??=[];proof.nativeFocusObservations.push({at:Date.now(),state});save();return state}
     const state = await h.main(`(${native.observeOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
     proof.nativeFocusObservations ??= []; proof.nativeFocusObservations.push({ at: Date.now(), state }); save()
     if (state.foregroundPid !== binding.pid) {
@@ -113,7 +116,7 @@ module.exports = async function(h) {
     await h.call('Page.enable')
     await h.call('DOM.enable')
     await h.call('Emulation.setFocusEmulationEnabled', { enabled: false })
-    await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
+    if(mac)await mac.focus();else await h.main(`(${native.focusOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
     await until('real native focus', () => h.evaluate('document.hasFocus()&&!document.hidden'), Boolean)
     proof.initialViewport = await viewport()
     proof.setup = await h.main(`(()=>{

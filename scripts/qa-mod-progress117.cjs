@@ -5,6 +5,7 @@ module.exports = async function (h, binding) {
   const approvedOut = fs.realpathSync.native(path.resolve('out')), directory = path.join(approvedOut, 'qa-mod-progress117-' + crypto.randomUUID())
   fs.mkdirSync(directory, { recursive: true })
   const proof = { complete: false, directory, classification: 'Actual foreground-checked Windows portable GUI, original production modsPrepare/Commit, streamed files, hash, cancellation and disk transaction. Repository metadata and loopback files are synthetic. No live provider or game launch claim.', cases: [], screenshots: [] }
+  proof.platform=process.platform;if(process.platform==='darwin')proof.classification=proof.classification.replace('Windows portable GUI','signed Mac package GUI')
   const save = () => fs.writeFileSync(path.join(directory, 'live.json'), JSON.stringify(proof, null, 2))
   const fixturePath = path.resolve('scripts/qa-mod-progress-fixture117.cjs'), config = { ...binding, profile: h.profile, root: path.join(directory, 'fixture'), approvedOut }
   const inspect = () => h.main('__qaModProgress117.inspect()')
@@ -15,7 +16,7 @@ module.exports = async function (h, binding) {
   }
   const menuClosed = () => h.until('actual select popover transition unmounted', () => h.evaluate("!!document.querySelector('.select-menu-float')"), v => !v)
   const key = async (key, code, vk, modifiers = 0) => { await h.foreground(); for (const type of ['keyDown', 'keyUp']) await h.call('Input.dispatchKeyEvent', { type, key, code, windowsVirtualKeyCode: vk, modifiers }); await h.wait(80) }
-  const text = async (selector, value) => { await h.click(selector); await key('a', 'KeyA', 65, 2); await h.call('Input.insertText', { text: value }) }
+  const text = async (selector, value) => { await h.click(selector); await key('a', 'KeyA', 65, process.platform==='darwin'?4:2); await h.call('Input.insertText', { text: value }) }
   const shot = async name => { const receipt = await h.screenshot('mod-progress117-' + name); proof.screenshots.push({ name, receipt }); save(); return receipt }
   const captureDialog = () => h.evaluate("(()=>{globalThis.__closedMod117=document.querySelector('.modinstall-modal');if(!__closedMod117||!__closedMod117.isConnected)throw Error('No actual connected MOD dialog');return{present:true,connected:__closedMod117.isConnected}})()")
   const closeDialog = async () => {

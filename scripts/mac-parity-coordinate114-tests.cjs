@@ -1,31 +1,46 @@
 // Pure parity orchestration fixtures; trusted flags here are synthetic data,
 // never native GUI or real service acceptance. Uses the actual shared sampler.
 const test=require('node:test'),assert=require('node:assert/strict')
-const{createParityCoordinate,assertParityTrustedTarget,createParityReload,parityReloadReady}=require('./verify-mac-parity-ui.cjs')
+const{createParityCoordinate,assertParityTrustedTarget,assertParityPointerDismissal,createParityReload,parityReloadReady}=require('./verify-mac-parity-ui.cjs')
 const geometry=require('./qa-coordinate-geometry114.cjs')
 const selector='.download-modal .filter-row .select-menu-btn',identity={pid:20,windowId:2,webContentsId:2},documentBinding={timeOrigin:100,url:'file:///owned/index.html'}
-function fixture({positions=[380,262,262],absence=[true],badTarget=false,inputError,readAdvance=1,lateInput=false,binding=documentBinding,rendererBinding=binding,duringRead,duringInput}={}){
- let at=0,index=0,point,records=[],reads=0;const inputs=[],timeouts=[],proof={operations:[],inputEvents:[],documentBinding:{...binding}}
- const native={...identity,visible:true,minimized:false,focused:true,appHidden:false,zoom:1,bounds:{x:0,y:20,width:1280,height:900},contentBounds:{x:0,y:20,width:1280,height:900}}
+function fixture({positions=[380,262,262],absence=[true],badTarget=false,inputError,readAdvance=1,lateInput=false,binding=documentBinding,rendererBinding=binding,duringRead,duringInput,pointerDismissal=false,actuallyDismissed=true,foreignNative=false}={}){
+ let at=0,index=0,point,records=[],reads=0,nativeReads=0;const inputs=[],timeouts=[],proof={operations:[],inputEvents:[],documentBinding:{...binding}}
+ const native={...identity,visible:true,minimized:false,focused:true,appHidden:false,frontmostPID:identity.pid,window:{id:7},zoom:1,bounds:{x:0,y:20,width:1280,height:900},contentBounds:{x:0,y:20,width:1280,height:900}},actualSelector=pointerDismissal?'[data-ui="App:32e6a4482be2"]':selector
  let expected
  const row=y=>({hit:true,x:815.5,y,bounds:{x:646,y:y-18.5,width:339,height:37},label:'Fabric',ancestorsVisible:true,runningAnimations:0,absent:true,renderer:{width:1280,height:900,hasFocus:true,hidden:false,pixelRatio:1,ready:'complete',...(typeof rendererBinding==='function'?rendererBinding():rendererBinding)}})
- const entry=type=>({type,isTrusted:true,at,timeOrigin:point.renderer.timeOrigin,url:point.renderer.url,x:point.x,y:point.y,button:0,buttons:type.endsWith('down')?1:0,target:{tag:'BUTTON'},matchesSelector:!badTarget,renderer:{width:1280,height:900,hasFocus:true,hidden:false,pixelRatio:1}})
- const run=createParityCoordinate({identity,documentBinding:()=>proof.documentBinding,proof,save:()=>{},now:()=>at,wait:async ms=>{at+=ms},geometry,native:async(_identity,timeoutMs)=>{assert.deepEqual(_identity,identity);timeouts.push(timeoutMs);return native},evaluate:async(expression,timeoutMs)=>{
+ const entry=type=>({type,isTrusted:true,at,timeOrigin:point.renderer.timeOrigin,url:point.renderer.url,x:point.x,y:point.y,button:0,buttons:type.endsWith('down')?1:0,target:pointerDismissal?{tag:type==='pointerdown'?'DIV':'BODY',ui:type==='pointerdown'?'App:32e6a4482be2':null}:{tag:'BUTTON'},matchesSelector:!badTarget&&(!pointerDismissal||type==='pointerdown'),renderer:{width:1280,height:900,hasFocus:true,hidden:false,pixelRatio:1}})
+ const run=createParityCoordinate({identity,documentBinding:()=>proof.documentBinding,proof,save:()=>{},now:()=>at,wait:async ms=>{at+=ms},pointerDismissal,geometry,native:async(_identity,timeoutMs)=>{assert.deepEqual(_identity,identity);timeouts.push(timeoutMs);nativeReads++;return{...structuredClone(native),...(foreignNative&&nativeReads>2?{frontmostPID:999}:{})}},evaluate:async(expression,timeoutMs)=>{
   timeouts.push(timeoutMs)
   if(expression.includes('scrollIntoView'))return
-  if(expression.includes('const renderer=')){at+=readAdvance;reads++;const sampleIndex=index++;point=row(positions[Math.min(sampleIndex,positions.length-1)]);point.absent=absence[Math.min(sampleIndex,absence.length-1)];duringRead?.(proof,reads);assert(expression.includes('.files-loading'),'real modal loading absence is required');return point}
-  if(expression.includes('o.begin(')){expected={selector,token:point.renderer.timeOrigin+':1',timeOrigin:point.renderer.timeOrigin,url:point.renderer.url};return expected.token}
+  if(expression.includes('const renderer=')){at+=readAdvance;reads++;const sampleIndex=index++;point=row(positions[Math.min(sampleIndex,positions.length-1)]);point.absent=absence[Math.min(sampleIndex,absence.length-1)];duringRead?.(proof,reads);if(!pointerDismissal)assert(expression.includes('.files-loading'),'real modal loading absence is required');return point}
+  if(expression.includes('o.begin(')){expected={selector:actualSelector,token:point.renderer.timeOrigin+':1',timeOrigin:point.renderer.timeOrigin,url:point.renderer.url};return expected.token}
   if(expression.includes('.finish('))return{...expected,overflow:false,records}
+  if(pointerDismissal&&expression==="!!document.querySelector('.dl-panel')")return true
+  if(pointerDismissal&&expression.includes('({panel:'))return{panel:!actuallyDismissed,backdrop:!actuallyDismissed,...documentBinding}
   throw Error('Unexpected fixture expression')
  },call:async(method,args,timeoutMs)=>{
   assert.equal(method,'Input.dispatchMouseEvent');inputs.push(args);timeouts.push(timeoutMs)
   duringInput?.(proof,args.type)
   if(inputError&&args.type==='mousePressed')throw inputError
   if(args.type==='mousePressed')records.push(entry('pointerdown'),entry('mousedown'))
-  if(args.type==='mouseReleased'){records.push(entry('pointerup'),entry('mouseup'),entry('click'));if(lateInput)at+=10001}
+  if(args.type==='mouseReleased'){records.push(entry('pointerup'),entry('mouseup'));if(!pointerDismissal)records.push(entry('click'));if(lateInput)at+=10001}
  }})
  return{run,proof,inputs,timeouts,get reads(){return reads},get at(){return at}}
 }
+test('actual pointerdown backdrop dismissal keeps complete trusted down/up, native identity and real panel removal',async()=>{
+ const f=fixture({pointerDismissal:true,positions:[262,262]});await f.run('[data-ui="App:32e6a4482be2"]');const op=f.proof.operations[0]
+ assert.equal(op.complete,true);assert.equal(op.trigger,'pointerdown dismissal');assert.equal(op.nativeSequence.length,6);assert.equal(op.actualDismissal.panel,false);assert.equal(op.trustedTargets.records[0].matchesSelector,true);assert.equal(op.trustedTargets.records[1].matchesSelector,false);assert.deepEqual(f.inputs.map(x=>x.type),['mouseMoved','mousePressed','mouseReleased'])
+ assert.throws(()=>assertParityTrustedTarget(op.trustedTargets,{...op.trustedTargets}),'generic five-event click contract remains strict and cannot accept this separate dismissal')
+})
+test('pointerdown dismissal refuses wrong overlay target, unremoved panel or foreign native foreground without retry',async()=>{
+ for(const options of [{badTarget:true},{actuallyDismissed:false},{foreignNative:true}]){const f=fixture({pointerDismissal:true,positions:[262,262],...options});await assert.rejects(f.run('[data-ui="App:32e6a4482be2"]'));assert.equal(f.proof.operations[0].complete,false);assert(f.inputs.filter(x=>x.type==='mousePressed').length<=1)}
+ const f=fixture({pointerDismissal:true});await assert.rejects(f.run('.different-mask'));assert.equal(f.inputs.length,0)
+})
+test('special backdrop dismissal refuses synthetic, incomplete, foreign-document or changed-coordinate evidence',async()=>{
+ const f=fixture({pointerDismissal:true,positions:[262,262]});await f.run('[data-ui="App:32e6a4482be2"]');const trace=f.proof.operations[0].trustedTargets,expected={selector:trace.selector,token:trace.token,...documentBinding}
+ for(const mutate of [x=>x.records[0].isTrusted=false,x=>x.records.pop(),x=>x.records[1].x++,x=>x.records[0].target.ui='different',x=>x.records[1].url='file:///foreign',x=>x.records[2].renderer.hasFocus=false,x=>x.overflow=true]){const changed=structuredClone(trace);mutate(changed);assert.throws(()=>assertParityPointerDismissal(changed,expected))}
+})
 test('parity samples async-moving modal geometry twice before a single native event sequence',async()=>{
  const f=fixture(),point=await f.run(selector)
  assert.equal(f.reads,3);assert.equal(point.y,262)
