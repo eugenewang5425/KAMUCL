@@ -202,7 +202,7 @@ test('external runtime reuse follows exact coordinates, preserves existing bytes
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
-test('community component actually renders empty-instance filter fallback (not compile-only)', async () => {
+test('community component actually renders all-version defaults and explicit selection modes with no instance (not compile-only)', async () => {
   const bundle = await build({ entryPoints: ['src/renderer/src/views/CommunityView.vue'], bundle: true, write: false, format: 'cjs', platform: 'node', packages: 'external', alias: { '@shared': path.resolve('src/shared') }, plugins: [{ name: 'vue-unit', setup(b) {
     b.onLoad({ filter: /\.vue$/ }, args => {
       const { descriptor } = parse(fs.readFileSync(args.path, 'utf8'))
@@ -215,7 +215,15 @@ test('community component actually renders empty-instance filter fallback (not c
   try {
     new Function('require', 'module', 'exports', bundle.outputFiles[0].text)(createRequire(path.resolve('package.json')), exported, exported.exports)
     const html = await renderToString(createSSRApp(exported.exports.default))
-    assert(html.includes('选择版本') && html.includes('使用当前实例'))
+    // The former always-visible "选择版本/使用当前实例" row implicitly
+    // suggested the launcher selection constrained browsing. The requested
+    // first-entry default now renders all filters with explicit mode controls.
+    assert.match(html, /data-ui="community:versions-all"[^>]*aria-pressed="true"/)
+    assert.match(html, /data-ui="community:versions-installed"[^>]*aria-pressed="false"/)
+    assert.match(html, /data-ui="community:versions-custom"[^>]*aria-pressed="false"/)
+    assert(html.includes('全部 Minecraft 版本') && html.includes('全部加载器'))
+    assert(!html.includes('aria-label="选择已安装版本"'), 'An instance selection control appears only after the explicit installed mode')
+    assert(!html.includes('data-ui="community:custom-version"'), 'Exact custom-version input appears only after the explicit custom mode')
     // Every route transition has a DOM wrapper even when a view also owns Teleports.
     assert.match(fs.readFileSync('src/renderer/src/App.vue', 'utf8'), /<Transition name="fade" :duration="routeDuration">\s*<div[^>]*class="route-view"/)
   } finally { Object.defineProperty(globalThis, 'localStorage', { value: previousStorage, configurable: true }) }

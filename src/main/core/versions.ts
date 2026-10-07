@@ -59,6 +59,7 @@ import {
   withGameFolder
 } from './paths'
 import { ensureInstanceThumbnail, removeInstanceThumbnail } from './appearanceAssets'
+import { assetDownloadStatus } from '../../shared/assetDownloadStatus'
 
 export type ProgressEmit = (e: ProgressEvent) => void
 
@@ -450,10 +451,11 @@ async function installVanillaUnlocked(
           const seen = new Set<string>()
           const tasks: DownloadTask[] = []
           const resourceFolders = allFolders()
-          for (const o of Object.values(objects)) {
+          for (const [name, o] of Object.entries(objects)) {
             if (!o?.hash || seen.has(o.hash)) continue
             seen.add(o.hash)
             tasks.push({
+              label: name,
               url: `https://resources.download.minecraft.net/${o.hash.slice(0, 2)}/${o.hash}`,
               dest: assetObjectPath(o.hash),
               sha1: o.hash,
@@ -467,7 +469,7 @@ async function installVanillaUnlocked(
               emit({
                 stage: 'assets',
                 progress: detail.fraction ?? 0,
-                text: `下载资源文件 ${d}/${t}`,
+                text: assetDownloadStatus(d, t, detail),
                 speed,
                 etaSeconds: detail.etaSeconds ?? undefined,
                 bytesDone: detail.bytesDone,
