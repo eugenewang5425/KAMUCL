@@ -186,11 +186,13 @@ test('a headers-only stalled legacy index is bounded and preserves the ordinary-
   })
 })
 
-test('production old-Forge installation uses the resolved artifact, verified sidecar and profile pipeline', { timeout: 15000 }, async () => {
+test('production old-Minecraft coordinate resolution uses verified sidecar and the modern-format installer CLI pipeline', { timeout: 15000 }, async () => {
   await fixture(async root => {
     const game = path.join(root, 'game'), base = path.join(game, 'versions', '1.7.10')
     fs.mkdirSync(base, { recursive: true }); fs.writeFileSync(path.join(base, '1.7.10.json'), JSON.stringify({ id: '1.7.10', libraries: [], mainClass: 'synthetic.Client' })); fs.writeFileSync(path.join(base, '1.7.10.jar'), 'synthetic client; never executed')
-    const jar = new AdmZip(); jar.addFile('install_profile.json', Buffer.from('{"versionInfo":{"libraries":[]}}'))
+    // This fixture covers coordinates/sidecar/CLI orchestration only. The real
+    // pre-CLI install/versionInfo schema is exercised by legacy-forge120.test.
+    const jar = new AdmZip(); jar.addFile('install_profile.json', Buffer.from('{"libraries":[]}'))
     const bytes = jar.toBuffer(), checksum = crypto.createHash('sha1').update(bytes).digest('hex'), requested: string[] = []
     const coordinate = '1.7.10-10.13.4.1614-1.7.10', installerPath = `/net/minecraftforge/forge/${coordinate}/forge-${coordinate}-installer.jar`
     const server = http.createServer((request, response) => {

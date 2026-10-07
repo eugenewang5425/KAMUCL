@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream'
-import { isTaskPaused } from './tasks'
+import { isTaskPaused, waitIfTaskPaused } from './tasks'
 
 type RequestOptions = { signal?: AbortSignal; headers?: Record<string, string>; method?: string; body?: string }
 
@@ -10,6 +10,7 @@ type RequestOptions = { signal?: AbortSignal; headers?: Record<string, string>; 
  */
 export async function systemDownload(url: string, init: RequestOptions): Promise<Response> {
   const { net } = await import('electron')
+  await waitIfTaskPaused(init.signal)
   init.signal?.throwIfAborted()
   return new Promise((resolve, reject) => {
     const request = net.request({ url, method: init.method ?? 'GET', redirect: 'manual',
