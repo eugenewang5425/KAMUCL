@@ -4,6 +4,7 @@
 // the placeholder profiles as runnable Minecraft installations.
 const assert = require('node:assert/strict')
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto')
+const { replaceNativeInput } = require('./verify-favorites-113.cjs')
 const SYNTHETIC = [
   { id: 'qa120-fabric', mcVersion: '1.20.1', loader: 'fabric' },
   { id: 'qa120-forge', mcVersion: '1.21.1', loader: 'forge' },
@@ -81,6 +82,67 @@ function readCommunityState() {
   const source = page?.querySelector('.version-source-option[aria-pressed=true]')
   return { present: !!page, source: source?.dataset.ui, keyword: page?.querySelector('[data-ui="CommunityView:bc0450fd9c8f"]')?.value, version: page?.querySelector('[aria-label="Minecraft 版本"]')?.value, summary: page?.querySelector('.version-filter-heading')?.innerText, loader: page?.querySelector('[aria-label="加载器"]')?.innerText.trim(), installed: page?.querySelector('[aria-label="选择已安装版本"]')?.innerText, mismatch: page?.querySelector('.version-loader-note')?.innerText, results: [...(page?.querySelectorAll('.result-title') ?? [])].map(row => row.innerText), busy: !!page?.querySelector('.result-list[aria-busy=true]'), scrollTop: content?.scrollTop ?? 0, horizontalOverflow: !!content && content.scrollWidth > content.clientWidth + 2, focus: document.hasFocus(), viewport: { width: innerWidth, height: innerHeight } }
 }
+// Read-only receiver observation. Editing remains a real Chromium editing
+// command/insertText; this observer never assigns a value, focus or selection.
+function installCommunityInputObserver(config) {
+  if (performance.timeOrigin !== config.timeOrigin || location.href !== config.url || globalThis.__qaCommunityInput120) throw Error('Community input document changed or observer already installed')
+  const input = document.querySelector(config.selector)
+  if (!input || document.activeElement !== input || !document.hasFocus() || document.hidden || document.readyState !== 'complete') throw Error('Community editing requires the actual focused input in the bound document')
+  const snapshot = () => ({ timeOrigin: performance.timeOrigin, url: location.href, focused: document.activeElement === input, documentFocused: document.hasFocus(), hidden: document.hidden, ready: document.readyState, present: document.querySelector(config.selector) === input, value: input.value, start: input.selectionStart, end: input.selectionEnd })
+  const events = []; let dropped = 0
+  const receive = event => {
+    if (event.target !== input) return
+    if (events.length === 128) { dropped++; return }
+    events.push({ type: event.type, isTrusted: event.isTrusted, key: event.key, code: event.code, metaKey: event.metaKey, ctrlKey: event.ctrlKey, inputType: event.inputType, data: event.data, receivedAt: Date.now(), eventTimeStamp: event.timeStamp, state: snapshot() })
+  }
+  const types = ['keydown', 'keyup', 'beforeinput', 'input']
+  for (const type of types) document.addEventListener(type, receive, true)
+  globalThis.__qaCommunityInput120 = { token: config.token, inspect() { return { token: config.token, state: snapshot(), events: events.slice(), dropped } }, restore() { for (const type of types) document.removeEventListener(type, receive, true); const receipt = this.inspect(); delete globalThis.__qaCommunityInput120; return receipt } }
+  return globalThis.__qaCommunityInput120.inspect()
+}
+function readCommunityInputObserver(token, restore = false) {
+  const observer = globalThis.__qaCommunityInput120
+  if (!observer || observer.token !== token) throw Error('Community input observer identity changed')
+  return restore ? observer.restore() : observer.inspect()
+}
+async function replaceCommunityText(h, binding, selector, value, options = {}) {
+  const platform = options.platform ?? process.platform, token = crypto.randomUUID()
+  const row = { token, selector, requestedValue: value, complete: false, commands: [], classification: 'Trusted coordinate focus, real Chromium key/edit commands, actual selection checks and read-only DOM receiver ledger; no DOM value/selection assignment and no native OS key-post claim' }
+  const record = () => options.record?.(row)
+  record()
+  let originalError, observerInstalled = false
+  const check = snapshot => {
+    assert.equal(snapshot.token, token)
+    for (const key of ['timeOrigin', 'url']) assert.equal(snapshot.state[key], binding[key], 'Community input bound document changed: ' + key)
+    for (const key of ['focused', 'documentFocused', 'present']) assert.equal(snapshot.state[key], true, 'Community input lost actual focus/identity: ' + key)
+    assert.equal(snapshot.state.hidden, false); assert.equal(snapshot.state.ready, 'complete')
+    return snapshot
+  }
+  try {
+    const actual = await h.main(`(()=>{const e=globalThis.testElectron,w=e?.BrowserWindow.fromId(${binding.windowId}),fs=process.mainModule.require('node:fs');return{pid:process.pid,profile:fs.realpathSync.native(e.app.getPath('userData')),executable:fs.realpathSync.native(process.execPath),windowId:w?.id,webContentsId:w?.webContents.id,url:w?.webContents.getURL()}})()`)
+    for (const key of ['pid', 'profile', 'executable', 'windowId', 'webContentsId', 'url']) assert.equal(actual[key], binding[key], 'Community editing rejects a changed owned process/window: ' + key)
+    const click = async target => {
+      await h.foreground(); await h.click(target); await h.foreground()
+      const installed = await h.evaluate(`(${installCommunityInputObserver})(${JSON.stringify({ token, selector, timeOrigin: binding.timeOrigin, url: binding.url })})`)
+      observerInstalled = true; row.before = check(installed); record()
+    }
+    const call = async (method, params) => {
+      await h.foreground(); const before = check(await h.evaluate(`(${readCommunityInputObserver})(${JSON.stringify(token)})`))
+      const entry = { method, params, startedAt: Date.now(), before }; row.commands.push(entry); record()
+      await h.call(method, params)
+      await h.foreground(); entry.after = check(await h.evaluate(`(${readCommunityInputObserver})(${JSON.stringify(token)})`)); entry.finishedAt = Date.now(); record()
+    }
+    row.result = await replaceNativeInput(click, call, h.evaluate, selector, value, platform)
+    row.complete = true
+  } catch (error) { originalError = error; row.error = { name: error.name, message: error.message } }
+  finally {
+    if (observerInstalled) try { row.receiver = await h.evaluate(`(${readCommunityInputObserver})(${JSON.stringify(token)},true)`) }
+    catch (error) { row.complete = false; row.cleanupError = { name: error.name, message: error.message }; if (!originalError) originalError = error }
+    row.finishedAt = Date.now(); record()
+  }
+  if (originalError) throw originalError
+  return row
+}
 async function run(h, binding) {
   const { evaluate, main, click, nav, call, wait, until, screenshot, foreground } = h
   for (const [name, fn] of Object.entries({ evaluate, main, click, nav, call, wait, until, screenshot, foreground })) assert.equal(typeof fn, 'function', 'Missing owner driver API ' + name)
@@ -93,14 +155,17 @@ async function run(h, binding) {
   // spawned process is the main PID. The relationship is observed from the
   // actual main process, never fabricated by changing the tracked child's PID.
   if (h.ownedTrack) assert(h.ownedTrack.pid === actualProcess.pid || h.ownedTrack.pid === actualProcess.ppid, 'Owned process must be the exact spawned main or its observed portable wrapper parent')
-  const proof = { complete: false, binding, actualProcess, trackedOwnerPID: h.ownedTrack?.pid, startedAt: new Date().toISOString(), operations: [], screenshots: [], layouts: [], classification: 'Actual packaged production Vue/IPC, trusted coordinate and keyboard inputs, native foreground owner checks. Source/manifest metadata and non-runnable installed profiles are synthetic; no real service, MOD install or game claim.' }
+  const proof = { complete: false, binding, actualProcess, trackedOwnerPID: h.ownedTrack?.pid, startedAt: new Date().toISOString(), operations: [], screenshots: [], layouts: [], inputs: [], classification: 'Actual packaged production Vue/IPC, trusted coordinate and keyboard inputs, native foreground owner checks. Source/manifest metadata and non-runnable installed profiles are synthetic; no real service, MOD install or game claim.' }
   const live = path.join(h.output, 'community120-' + h.theme + '-live.json')
   fs.writeFileSync(live, JSON.stringify(proof, null, 2), { flag: 'wx' })
   const save = () => fs.writeFileSync(live, JSON.stringify(proof, null, 2))
   const observe = async (label, read, predicate = Boolean) => { const value = await until(label, read, predicate); proof.operations.push({ label, at: Date.now(), value }); save(); return value }
   const state = () => evaluate(`(${readCommunityState})()`)
   const key = async (key, code, vk, modifiers = 0) => { await foreground(); for (const type of ['keyDown', 'keyUp']) await call('Input.dispatchKeyEvent', { type, key, code, windowsVirtualKeyCode: vk, modifiers }) }
-  const text = async (selector, value) => { await click(selector); await key('a', 'KeyA', 65, process.platform === 'darwin' ? 4 : 2); await call('Input.insertText', { text: value }) }
+  const documentBinding = await evaluate('({timeOrigin:performance.timeOrigin,url:location.href})')
+  const inputBinding = { ...binding, profile, executable: fs.realpathSync.native(binding.executable), ...documentBinding }
+  proof.documentBinding = documentBinding; save()
+  const text = (selector, value) => replaceCommunityText(h, inputBinding, selector, value, { record(row) { if (!proof.inputs.includes(row)) proof.inputs.push(row); save() } })
   const shot = async label => { await foreground(); const result = await screenshot('community120-' + label); proof.screenshots.push({ label, result }); save(); return result }
   const inspect = () => main('__qaCommunity120.inspect()')
   const lastQuery = async () => (await inspect()).records.filter(row => row.channel === 'community:search').at(-1)?.args[0]
@@ -212,4 +277,4 @@ async function run(h, binding) {
   assert.equal(proof.complete, true); return proof
 }
 module.exports = run
-Object.assign(module.exports, { prepareCommunityProfile, installCommunityFixture, readCommunityState })
+Object.assign(module.exports, { prepareCommunityProfile, installCommunityFixture, readCommunityState, installCommunityInputObserver, readCommunityInputObserver, replaceCommunityText })
