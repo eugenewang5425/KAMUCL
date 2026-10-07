@@ -15,7 +15,9 @@ let bundled: Promise<string> | undefined
  * Lexical process injection keeps aggregate tests' global runtime unchanged.
  */
 async function fixture(run: (api: any, root: string, module: any, transport: any) => Promise<void>) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kamucl-system-dispatch120-'))
+  const temporaryBase = fs.realpathSync.native(os.tmpdir()), prefix = 'kamucl-system-dispatch120-'
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(temporaryBase, prefix)))
+  assert.equal(fs.realpathSync.native(root), root)
   const requests: string[] = [], calls: Array<{ transport: string; url: string; paused: boolean }> = []
   const server = http.createServer((req, res) => { requests.push(req.url!); res.end('0123456789012345678901234567890123456789') })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -46,7 +48,10 @@ async function fixture(run: (api: any, root: string, module: any, transport: any
   finally {
     for (const gate of gates.values()) gate.ready.resolve(electron)
     await api.closeHttpClient(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()))
-    assert(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep + 'kamucl-system-dispatch120-'))
+    const relative = path.relative(temporaryBase, root)
+    assert(relative.startsWith(prefix) && relative === path.basename(root) && !path.isAbsolute(relative))
+    assert.equal(path.dirname(root), temporaryBase)
+    assert.equal(fs.realpathSync.native(root), root)
     fs.rmSync(root, { recursive: true, force: true })
   }
 }
