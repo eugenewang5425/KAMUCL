@@ -38,22 +38,34 @@ async function connect(p, main) {
     let r, m
     try {
       r = await connect(p, false); m = await connect(mp, true)
-      const binding = await m.evaluate("(()=>{globalThis.testElectron=process.mainModule.require('electron');const w=testElectron.BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('/renderer/index.html'));return {pid:process.pid,ppid:process.ppid,windowId:w.id,webContentsId:w.webContents.id,exe:process.execPath,profile:testElectron.app.getPath('userData')}})()")
+      const windowSelection = { theme, samples: [], complete: false }; (proof.windowSelections ??= []).push(windowSelection); save()
+      let binding
+      const deadline = performance.now() + 10000
+      while (performance.now() < deadline) {
+        const state = await m.evaluate("(()=>{globalThis.testElectron=process.mainModule.require('electron');const windows=testElectron.BrowserWindow.getAllWindows().map(w=>({windowId:w.id,webContentsId:w.webContents.id,url:w.webContents.getURL(),visible:w.isVisible(),opacity:w.getOpacity()}));return {pid:process.pid,ppid:process.ppid,exe:process.execPath,profile:testElectron.app.getPath('userData'),appReady:testElectron.app.isReady(),windows}})()")
+        assert(state.pid === track.pid || state.ppid === track.pid); assert.equal(fs.realpathSync.native(state.profile), fs.realpathSync.native(profile))
+        const matches = state.windows.filter(w => w.url.includes('/renderer/index.html'))
+        windowSelection.samples.push({ at: Date.now(), ...state }); save()
+        assert(matches.length <= 1, 'Multiple actual production renderers were observed')
+        if (state.appReady && matches.length === 1) { binding = { ...state, ...matches[0] }; windowSelection.complete = true; save(); break }
+        await sleep(100)
+      }
+      assert(binding, 'Actual production renderer did not commit its navigation before the deadline')
       assert(binding.pid === track.pid || binding.ppid === track.pid); assert.equal(fs.realpathSync.native(binding.profile), fs.realpathSync.native(profile))
       const koffi = path.resolve('node_modules/koffi'), observe = () => m.evaluate(`(${native.observeOwned})(${JSON.stringify(binding)},${JSON.stringify(koffi)})`)
       const focus = async () => { const s = await observe(); assert.equal(s.foreground, s.hwnd); assert.equal(s.foregroundPid, binding.pid); assert(s.visible && s.focused && !s.minimized); return s }
       const ready = async expression => { for (let i = 0; i < 100; i++) { const state = await r.evaluate(expression); if (state) return state; await sleep(100) } throw Error('UI not ready: ' + expression) }
-      const click = async selector => {
-        const point = await ready(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),b=e?.getBoundingClientRect();if(!b||e.disabled)return false;const x=b.x+b.width/2,y=b.y+b.height/2,hit=document.elementFromPoint(x,y);return (hit===e||e.contains(hit))&&x>0&&y>0&&x<innerWidth&&y<innerHeight?{x,y}:false})()`)
+      const click = async (selector, offset = { x: 0.5, y: 0.5 }) => {
+        const point = await ready(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),b=e?.getBoundingClientRect();if(!b||e.disabled)return false;const x=b.x+b.width*${offset.x},y=b.y+b.height*${offset.y},hit=document.elementFromPoint(x,y);return (hit===e||e.contains(hit))&&x>0&&y>0&&x<innerWidth&&y<innerHeight?{x,y}:false})()`)
         await focus(); for (const [type, buttons] of [['mouseMoved', 0], ['mousePressed', 1], ['mouseReleased', 0]]) await r.call('Input.dispatchMouseEvent', { type, ...point, button: type === 'mouseMoved' ? 'none' : 'left', buttons, clickCount: type === 'mouseMoved' ? 0 : 1 }); await sleep(100); await focus()
       }
-      await ready("document.querySelector('.dl-toggle') && document.querySelector('.viewer3d canvas') && document.documentElement.dataset.theme === " + JSON.stringify(theme))
+      await ready("document.querySelector('.top-actions') && document.querySelector('.viewer3d canvas') && document.documentElement.dataset.theme === " + JSON.stringify(theme))
       // Renderer readiness precedes the portable wrapper's native fade. Observe
       // its real terminal marker; never hide feedback or infer completion from
       // a fixed delay, or native screenshots may still contain its face layer.
-      const boot = await m.evaluate("(()=>{const fs=process.mainModule.require('node:fs'),signal=process.env.KAMUCL_BOOT_SIGNAL;if(!signal)throw Error('Portable startup signal is absent');return {signal,visible:fs.existsSync(signal+'.visible')?fs.readFileSync(signal+'.visible','utf8'):null}})()")
+      const boot = await m.evaluate("(()=>{const fs=process.mainModule.require('node:fs'),signal=process.env.KAMUCL_BOOT_SIGNAL;if(!signal)throw Error('Portable startup signal is absent');return {signal,visible:fs.existsSync(signal+'.visible')?fs.readFileSync(signal+'.visible','utf8'):null}})()"); boot.samples = []; (proof.bootObservations ??= []).push({ theme, boot })
       rowBootWait: for (let i = 0; i <= 100; i++) {
-        boot.finished = await m.evaluate(`(()=>{const fs=process.mainModule.require('node:fs'),file=${JSON.stringify(boot.signal + '.finished')};return fs.existsSync(file)?fs.readFileSync(file,'utf8'):null})()`)
+        const sample = await m.evaluate(`(()=>{const fs=process.mainModule.require('node:fs'),s=${JSON.stringify(boot.signal)},w=testElectron.BrowserWindow.fromId(${binding.windowId});return {finished:fs.existsSync(s+'.finished')?fs.readFileSync(s+'.finished','utf8'):null,signalState:fs.existsSync(s)?fs.readFileSync(s,'utf8'):null,mainVisible:w.isVisible(),mainOpacity:w.getOpacity(),isLoading:w.webContents.isLoading()}})()`); boot.samples.push({ at: Date.now(), ...sample }); boot.finished = sample.finished; save()
         if (boot.finished === 'done') { boot.observedAt = Date.now(); break rowBootWait }
         assert(i < 100, 'Native portable startup feedback did not finish'); await sleep(200)
       }
@@ -73,7 +85,7 @@ async function connect(p, main) {
         for (const [state, text] of Object.entries(texts)) {
           const event = { taskId: `ui120-${theme}-${width}-${zoom}`, taskTitle: '导入整合包 · 合成界面验收', stage: 'assets', text, progress: 0.999, overall: 0.86, parallelStages: [{ id: 'assets', label: '资源文件', state: 'running', progress: 0.999, text }] }
           await m.evaluate(`testElectron.BrowserWindow.fromId(${binding.windowId}).webContents.send('event:progress',${JSON.stringify(event)});true`)
-          if (!open || !await r.evaluate("!!document.querySelector('.dl-panel')")) { await click('.dl-toggle'); open = true }
+          if (!open || !await r.evaluate("!!document.querySelector('.dl-panel')")) { await click('[data-ui="App:50549c4d6612"][title="下载中心"]'); open = true }
           await ready(`document.querySelector('.dl-stage-detail')?.innerText === ${JSON.stringify(text)}`)
           const geometry = await r.evaluate("(()=>{const e=document.querySelector('.dl-stage-detail'),p=document.querySelector('.dl-panel'),b=e.getBoundingClientRect(),r=p.getBoundingClientRect();return {text:e.innerText,scrollWidth:e.scrollWidth,clientWidth:e.clientWidth,whiteSpace:getComputedStyle(e).whiteSpace,bodyOverflow:document.documentElement.scrollWidth>innerWidth,panel:{x:r.x,y:r.y,width:r.width,height:r.height},detail:{x:b.x,y:b.y,width:b.width,height:b.height},viewport:{width:innerWidth,height:innerHeight}}})()")
           assert.equal(geometry.whiteSpace, 'normal'); assert(geometry.scrollWidth <= geometry.clientWidth + 1); assert(!geometry.bodyOverflow)
@@ -82,10 +94,24 @@ async function connect(p, main) {
           layout.states.push({ state, geometry, focused, screenshot: { file: name, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') } }); save()
         }
         await m.evaluate(`testElectron.BrowserWindow.fromId(${binding.windowId}).webContents.send('event:installDone',{taskId:${JSON.stringify(`ui120-${theme}-${width}-${zoom}`)},ok:false,error:'下载源限流，可稍后重试：资源文件 minecraft/sounds/fixture120/test.ogg',stage:'assets'});true`)
-        await ready("!!document.querySelector('.dl-error')"); await click('.dl-error .dl-dismiss'); await click('.dl-toggle'); open = false
+        await ready("!!document.querySelector('.dl-error')"); await click('.dl-error .dl-dismiss')
+        // Dismissing the last active task removes the home download button.
+        // Close through the real backdrop, never the similarly styled log button.
+        if (await r.evaluate("!!document.querySelector('.dl-panel')")) await click('[data-ui="App:32e6a4482be2"]', { x: 0.05, y: 0.9 })
+        await ready("!document.querySelector('.dl-panel')"); open = false
+        while (await r.evaluate("!!document.querySelector('.toast-close')")) await click('.toast-close')
+        await ready("!document.querySelector('.toast')")
       }
       row.complete = true
-    } catch (error) { proof.failure = { theme, message: error.message, stack: error.stack }; save(); throw error }
+    } catch (error) {
+      proof.failure = { theme, message: error.message, stack: error.stack }
+      if (r) try {
+        proof.failure.visibleControls = await r.evaluate("Array.from(document.querySelectorAll('.dl-toggle,.notice-panel,.notice-mask,.toast-close')).map(e=>({tag:e.tagName,title:e.title,ui:e.dataset.ui,text:e.innerText,rect:JSON.parse(JSON.stringify(e.getBoundingClientRect()))}))")
+        const bytes = Buffer.from((await r.call('Page.captureScreenshot', { format: 'png' })).data, 'base64'); fs.writeFileSync(path.join(output, 'failure.png'), bytes, { flag: 'wx' })
+        proof.failure.screenshotSHA256 = crypto.createHash('sha256').update(bytes).digest('hex')
+      } catch (captureError) { proof.failure.captureError = captureError.message }
+      save(); throw error
+    }
     finally {
       if (m) await m.evaluate("testElectron.app.quit();true").catch(() => {})
       r?.ws.close(); m?.ws.close(); await owned.finishOwnedChild(track, { timeoutMs: 15000 }); fs.closeSync(log); save()
