@@ -252,11 +252,16 @@ function assertParityTrustedTarget(trace,expected){
 }
 function assertParityPointerDismissal(trace,expected){
  assert.equal(expected.selector,'[data-ui="App:32e6a4482be2"]','Only the actual download backdrop uses this pointerdown dismissal contract')
+ assert(Number.isInteger(expected.x)&&Number.isInteger(expected.y),'Dismissal must bind its actually dispatched integer coordinates')
  assert.equal(trace.selector,expected.selector);assert.equal(trace.token,expected.token);assert.equal(trace.timeOrigin,expected.timeOrigin);assert.equal(trace.url,expected.url);assert.equal(trace.overflow,false)
  assert.deepEqual(trace.records.map(row=>row.type),['pointerdown','mousedown','pointerup','mouseup'],'Original native down/up sequence must remain complete after the pointerdown target is unmounted')
  const down=trace.records[0];assert.equal(down.matchesSelector,true);assert.equal(down.target.tag,'DIV');assert.equal(down.target.ui,'App:32e6a4482be2')
- for(const row of trace.records){assert.equal(row.isTrusted,true);assert.equal(row.timeOrigin,expected.timeOrigin);assert.equal(row.url,expected.url);assert.equal(row.renderer.hasFocus,true);assert.equal(row.renderer.hidden,false);assert(Number.isFinite(row.at)&&Number.isFinite(row.x)&&Number.isFinite(row.y));assert.equal(row.x,down.x);assert.equal(row.y,down.y)}
+ for(const row of trace.records){assert.equal(row.isTrusted,true);assert.equal(row.timeOrigin,expected.timeOrigin);assert.equal(row.url,expected.url);assert.equal(row.renderer.hasFocus,true);assert.equal(row.renderer.hidden,false);assert(Number.isFinite(row.at)&&Number.isFinite(row.x)&&Number.isFinite(row.y));assert.equal(row.x,expected.x);assert.equal(row.y,expected.y)}
  return true
+}
+function observePointerDismissInteger(selector,original,integer){
+ const matches=document.querySelectorAll(selector),mask=matches.length===1?matches[0]:null,originalTarget=document.elementFromPoint(original.x,original.y),integerTarget=document.elementFromPoint(integer.x,integer.y)
+ return{count:matches.length,connected:!!mask?.isConnected,sameTarget:!!mask&&integerTarget===mask&&originalTarget===mask,bounds:mask?.getBoundingClientRect().toJSON(),target:integerTarget?{tag:integerTarget.tagName,ui:integerTarget.getAttribute('data-ui')}:null,x:integer.x,y:integer.y,renderer:{width:innerWidth,height:innerHeight,hasFocus:document.hasFocus(),hidden:document.hidden,pixelRatio:devicePixelRatio,timeOrigin:performance.timeOrigin,url:location.href,ready:document.readyState}}
 }
 function assertPointerDismissNative(value,reference,identity){
  for(const key of ['pid','windowId','webContentsId'])assert.equal(value[key],identity[key])
@@ -285,7 +290,16 @@ function createParityCoordinate({call,evaluate,native,wait,identity,documentBind
    if(expectedLayout)assert(nativeNavigationLayoutReady(observed,operation.samples.at(-2)?.value,{...expectedLayout,pid:identity.pid,windowId:identity.windowId,webContentsId:identity.webContentsId}),'original native navigation geometry condition must remain satisfied')
    assert(now()<end,'Original coordinate deadline elapsed before trusted-target observation')
    token=await evaluate(geometry.trustedTargetStartExpression(selector),remaining());operation.token=token;save()
-   const point=observed.coordinate
+   let point=observed.coordinate
+   if(pointerDismissal){
+    point={...point,x:Math.trunc(point.x),y:Math.trunc(point.y)}
+    const actual=await evaluate(`(${observePointerDismissInteger.toString()})(${JSON.stringify(selector)},${JSON.stringify({x:observed.coordinate.x,y:observed.coordinate.y})},${JSON.stringify({x:point.x,y:point.y})})`,remaining())
+    operation.integerDismissal={original:{x:observed.coordinate.x,y:observed.coordinate.y},dispatch:{x:point.x,y:point.y},actual};save()
+    assert.equal(actual.count,1);assert.equal(actual.connected,true);assert.equal(actual.sameTarget,true,'The actual integer pixel must hit the same original download backdrop');assert.equal(actual.target.tag,'DIV');assert.equal(actual.target.ui,'App:32e6a4482be2');assert.equal(actual.x,point.x);assert.equal(actual.y,point.y)
+    for(const key of ['x','y','width','height'])assert.equal(actual.bounds[key],observed.coordinate.bounds[key],'The original backdrop bounds must stay unchanged')
+    for(const key of ['width','height','pixelRatio','timeOrigin','url','ready'])assert.equal(actual.renderer[key],observed.coordinate.renderer[key]);assert.equal(actual.renderer.hasFocus,true);assert.equal(actual.renderer.hidden,false)
+    assert(now()<end,'Original coordinate deadline elapsed before integer pixel validation')
+   }
    if(pointerDismissal){assertPointerDismissNative(observed.native,observed.native,identity);operation.trigger='pointerdown dismissal';operation.nativeSequence=[];assert.equal(await evaluate("!!document.querySelector('.dl-panel')",remaining()),true,'Actual download panel must exist before its backdrop dismissal')}
    for(const[type,buttons]of[['mouseMoved',0],['mousePressed',1],['mouseReleased',0]]){
     assert(now()<end,'Original coordinate deadline elapsed before input dispatch')
@@ -300,7 +314,7 @@ function createParityCoordinate({call,evaluate,native,wait,identity,documentBind
   finally{
    if(token!==undefined)try{
     operation.trustedTargets=await evaluate(geometry.trustedTargetStopExpression(token),remaining())
-    if(pointerDismissal)assertParityPointerDismissal(operation.trustedTargets,{selector,token,...boundDocument});else assertParityTrustedTarget(operation.trustedTargets,{selector,token,...boundDocument})
+    if(pointerDismissal)assertParityPointerDismissal(operation.trustedTargets,{selector,token,...boundDocument,...operation.integerDismissal?.dispatch});else assertParityTrustedTarget(operation.trustedTargets,{selector,token,...boundDocument})
     assert(now()<end,'Original coordinate deadline elapsed during trusted-target observation')
    }catch(error){operation.complete=false;operation.trustedTargetError={name:error.name,message:error.message};if(!primaryError)throw error}
    finally{save()}
@@ -570,4 +584,4 @@ module.exports=async function verifyMacParity(h){
  finally{try{proof.trustedTargetObserverRestoration=await evaluate(require('./qa-coordinate-geometry114.cjs').trustedTargetRestoreExpression());save();assert.equal(proof.trustedTargetObserverRestoration.complete,true)}catch(error){proof.complete=false;proof.trustedTargetRestorationError={name:error.name,message:error.message};save();if(!proof.error){preservePrimaryFailure(proof,error,save);throw error}}}
 }
 async function coordinatePosition(evaluate,selector){return evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;if(!e.contains(document.elementFromPoint(x,y)))throw Error('actual queue hit target obscured');return{x,y}})()`)}
-Object.assign(module.exports,{ROUTES,THEMES,LAYOUTS,ROUTE_COMPONENTS,assertEditableNativeTextInput,nativeInputLayoutReady,nativeNavigationLayoutReady,assertNavigationCoverage,assertQueueLedger,publicAccount,stableHash,installMacParityObserver,readDownloadSelectionState,assertMatchingDownloadResponse,assertDownloadTargetSelection,readMountedInstallInput,assertActualCommitTrace,createQueueClickObserver,createInstallHandlerObserver,restoreInstallHandlerObserver,preserveInstallObservation,collectAndRestoreInstallObserver,collectAndRestoreCommitObservation,preservePrimaryFailure,assertParityTrustedTarget,assertParityPointerDismissal,assertPointerDismissNative,createParityCoordinate,parityReloadReady,createParityReload})
+Object.assign(module.exports,{ROUTES,THEMES,LAYOUTS,ROUTE_COMPONENTS,assertEditableNativeTextInput,nativeInputLayoutReady,nativeNavigationLayoutReady,assertNavigationCoverage,assertQueueLedger,publicAccount,stableHash,installMacParityObserver,readDownloadSelectionState,assertMatchingDownloadResponse,assertDownloadTargetSelection,readMountedInstallInput,assertActualCommitTrace,createQueueClickObserver,createInstallHandlerObserver,restoreInstallHandlerObserver,preserveInstallObservation,collectAndRestoreInstallObserver,collectAndRestoreCommitObservation,preservePrimaryFailure,assertParityTrustedTarget,assertParityPointerDismissal,observePointerDismissInteger,assertPointerDismissNative,createParityCoordinate,parityReloadReady,createParityReload})
