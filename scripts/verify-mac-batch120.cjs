@@ -45,7 +45,7 @@ async function bindRenderer(evaluate,observe,waitFor=wait,budgetMs=10000,started
   if(state.appReady&&state.matches===1&&state.windows.some(w=>w.role==='main-renderer'&&w.visible&&w.opacity>=.999)&&!state.windows.some(w=>w.role==='startup-splash'))return state.binding
   await waitFor(80)
  }
- throw Error('Unique actual production renderer did not become ready within '+budgetMs+' ms; original window inventory retained')
+ const error=Error('Unique actual production renderer did not become ready within '+budgetMs+' ms; original window inventory retained');error.code='QA_RENDERER_BIND_DEADLINE';throw error
 }
 function createBatchNavigation({click,until,foreground,evaluate}){
  return async id=>{
@@ -137,7 +137,9 @@ async function run(){
    const h={root,profile,game,games:game,theme,version:pkg.version,output,call,evaluate,main:main.evaluate,click,nav,wait,until,screenshot,foreground,ownedTrack:track,binding}
    row.community=await require('./qa-community120.cjs')(h,binding);assert.equal(row.community.complete,true);save()
    row.complete=true
-  }catch(error){row.error={name:error.name,message:error.message,stack:error.stack};proof.errors.push({theme,...row.error});save()}
+  }catch(error){row.error={name:error.name,message:error.message,stack:error.stack};proof.errors.push({theme,...row.error});save()
+   if(error.code==='QA_RENDERER_BIND_DEADLINE'&&main){try{row.bootFailureDiagnostic=await require('./mac-boot-failure120.cjs').observeFailedBoot({evaluate:main.evaluate,expected:{pid:track.pid,profile,executable:fs.realpathSync.native(exe),windows:row.bindingSamples.at(-1).windows.filter(w=>['main-renderer','startup-splash'].includes(w.role))},trigger:{code:error.code,bindingStartedAt:row.bindingStartedAt,bindingBudgetMs:row.bindingBudgetMs,failedAt:Date.now(),originalMessage:row.error.message},output,captureDesktop:(file,left)=>execFileSync('/usr/sbin/screencapture',['-x',file],{timeout:Math.max(1,Math.floor(left)),stdio:['ignore','ignore','pipe']})});save()}catch(diagnosticError){row.bootFailureDiagnosticError={name:diagnosticError.name,message:diagnosticError.message};save()}}
+  }
   finally{
    if(main)try{row.bootObservation=await main.evaluate('globalThis.__qaBoot120?__qaBoot120.snapshot():null');row.bootObserverRestored=await main.evaluate('globalThis.__qaBoot120?__qaBoot120.restore():({complete:true,absent:true})');save()}catch(error){row.bootObservationError={name:error.name,message:error.message};save()}
    if(main)try{await main.evaluate('setTimeout(()=>testElectron.app.quit(),500);true')}catch(error){row.quitRequestError=String(error)}
