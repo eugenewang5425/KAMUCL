@@ -4,7 +4,8 @@
 新发行版应附带 KAMUCL-版本-source.zip，对应同名版本标签。
 源码包含应用及 LGPL 部分、桥接 MOD、原生辅助程序、视觉资产、脚本、锁文件与许可。
 
-1. 安装 Node.js 22、npm、JDK 17 或更新版本；JAVA_HOME 指向 JDK。
+1. 安装 Node.js 24、npm、完整 JDK 17 或更新版本；JAVA_HOME 和 PATH 指向 JDK，
+   确认 javac 与 jar 可用。完整构建会编译桥接和离线皮肤组件。
 2. 在源码根目录运行 npm ci。
 3. node scripts/build-bridge.cjs 从 Fabric Maven 和 Maven Central 获取固定版本
    编译依赖并校验 SHA256。离线可用 KAMUCL_BUILD_LIBS 指向同坐标 Maven 目录。
@@ -12,7 +13,8 @@
    Windows 原生程序由系统 .NET Framework csc.exe 编译；Mac 不需要它。
 5. npm start 启动修改版。Windows 用 npm run dist:win；本批 Windows 使用 Electron 44.3.0。
    Mac 构建使用 package.json 固定的 Electron 版本及 npm run dist:mac，
-   与 Windows 共用界面与业务代码。本批仅交付 Windows，不宣称新的 Mac 原生验收。
+   与 Windows 共用界面与业务代码。本批目标为 Windows x64 和 Mac ARM64；
+   原生构建、实际验收范围和未覆盖项以本版交付记录为准，不能以同源推断通过。
 6. .github/workflows/mac-build.yml 描述原生构建、签名、APP ZIP 与 DMG 验证。
    npm test、npx tsc --noEmit 与 npm run license:check 提供本地检查。
 7. scripts/build-offline-skin-agent.cjs 使用 javac --release 8 构建原创
