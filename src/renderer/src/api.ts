@@ -222,8 +222,9 @@ export const communityFiles = (
 /** 下载资源文件，返回保存路径；kind=modpack 时自动进入整合包安装流程 */
 export const communityDownload = (
   file: CommunityFile,
-  target: { versionId: string; kind: CommunityKind; folder?: string }
-) => invoke<string>(IPC.communityDownload, file, target)
+  target: { versionId: string; kind: CommunityKind; folder?: string },
+  operationId?: string
+) => invoke<string>(IPC.communityDownload, file, target, operationId)
 
 // ---------------- Java ----------------
 export const listJava = () => invoke<JavaInfo[]>(IPC.javaList)

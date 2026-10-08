@@ -1,3 +1,4 @@
+import { registerAppearanceAssetHandlers } from './assetsSettings'
 import { currentPlatformInfo } from './platform'
 import { applyUiWindowAutoFit } from './uiWindowSizing'
 import { registerRecordingsIpc } from './core/recordingsIpc'
@@ -34,7 +35,7 @@ import os from 'node:os'
 import path from 'node:path'
 import * as defaultPacks from './core/defaultResourcePacks'
 import { applyDefaultResourcePacksToInstance } from './core/defaultResourcePackApply'
-import { DEFAULT_BACKGROUND, DEFAULT_LAUNCH_THUMBNAIL, IPC, IPC_EVENT } from '../shared/types'
+import { IPC, IPC_EVENT } from '../shared/types'
 import type {
   CommunityFile,
   CommunityKind,
@@ -96,7 +97,6 @@ import * as worlds from './core/worlds'
 import * as yggdrasil from './core/yggdrasil'
 import * as appearance from './core/appearanceAssets'
 import { applyNativeAppearance } from './nativeAppearance'
-import { carouselImages, MAX_CAROUSEL_IMAGES } from '../shared/appearancePolicy'
 import { pathIdentity } from './core/folderPaths'
 import * as direct from './core/directConnect'
 import type { DirectHostRequest } from '../shared/directConnect'
@@ -213,75 +213,7 @@ export function registerIpc(getWin: () => BrowserWindow | null): void {
   ipcMain.handle(IPC.appSelectImage, async () => {
     return pickImage('选择图片')
   })
-  ipcMain.handle(IPC.appearanceImportBackground, async () => {
-    const source = await pickImage('导入自定义背景')
-    if (!source) return null
-    const previous = settings.getSettings()
-    const imported = await appearance.importGlobalImage(source, 'background')
-    try {
-      const next = settings.saveSettings({
-        background: { ...previous.background, image: imported.path, mode: 'image' }
-      })
-      if (previous.background.image !== imported.path) {
-        appearance.removeGlobalImage(previous.background.image, 'background')
-      }
-      return next
-    } catch (error) {
-      appearance.removeGlobalImage(imported.path, 'background')
-      throw error
-    }
-  })
-  ipcMain.handle(IPC.appearanceImportBackgroundMulti, async () => {
-    const win = getWin()
-    const options = { title: '导入背景图片（可多选）', properties: ['openFile' as const, 'multiSelections' as const],
-      filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] }
-    const selection = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
-    if (selection.canceled || !selection.filePaths.length) return null
-    const imported: string[] = []
-    try {
-      for (const source of selection.filePaths) imported.push((await appearance.importGlobalImage(source, 'background')).path)
-      const current = settings.getSettings().background
-      const images = [...new Set([...(current.images ?? []), ...imported])]
-      return settings.saveSettings({ background: { ...current, images, image: images[0] ?? current.image, mode: 'image' } })
-    } catch (error) {
-      for (const image of imported) appearance.removeGlobalImage(image, 'background')
-      throw error
-    }
-  })
-  ipcMain.handle(IPC.appearanceResetBackground, () => {
-    const previous = settings.getSettings().background
-    const next = settings.saveSettings({ background: structuredClone(DEFAULT_BACKGROUND) })
-    appearance.removeGlobalImage(previous.image, 'background')
-    for (const image of previous.images ?? []) appearance.removeGlobalImage(image, 'background')
-    return next
-  })
-  ipcMain.handle(IPC.appearanceImportLaunchThumbnail, async () => {
-    const win = getWin()
-    const options = { title: '添加首页轮播图片（可多选）', properties: ['openFile' as const, 'multiSelections' as const],
-      filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] }
-    const selection = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
-    if (selection.canceled || !selection.filePaths.length) return null
-    if (carouselImages(settings.getSettings().launchThumbnail).length + selection.filePaths.length > MAX_CAROUSEL_IMAGES) {
-      throw new Error(`首页轮播最多 ${MAX_CAROUSEL_IMAGES} 张图片，请先移除部分图片`)
-    }
-    const imported: string[] = []
-    try {
-      for (const source of selection.filePaths) imported.push((await appearance.importGlobalImage(source, 'launch-thumbnail')).path)
-      const current = settings.getSettings().launchThumbnail
-      const images = [...carouselImages(current), ...imported]
-      if (images.length > MAX_CAROUSEL_IMAGES) throw new Error(`首页轮播最多 ${MAX_CAROUSEL_IMAGES} 张图片`)
-      return settings.saveSettings({ launchThumbnail: { ...current, images, image: images[0] ?? '' } })
-    } catch (error) {
-      for (const image of imported) appearance.removeGlobalImage(image, 'launch-thumbnail')
-      throw error
-    }
-  })
-  ipcMain.handle(IPC.appearanceResetLaunchThumbnail, () => {
-    const previous = carouselImages(settings.getSettings().launchThumbnail)
-    const next = settings.saveSettings({ launchThumbnail: structuredClone(DEFAULT_LAUNCH_THUMBNAIL) })
-    for (const image of previous) appearance.removeGlobalImage(image, 'launch-thumbnail')
-    return next
-  })
+  registerAppearanceAssetHandlers(getWin)
   ipcMain.handle(IPC.appSelectDir, async () => {
     const win = getWin()
     const opts = { properties: ['openDirectory' as const], title: '选择游戏目录' }
@@ -660,16 +592,17 @@ export function registerIpc(getWin: () => BrowserWindow | null): void {
   )
   ipcMain.handle(
     IPC.communityDownload,
-    async (_e, file: CommunityFile, target: { versionId: string; kind: CommunityKind; folder?: string }) => {
+    async (_e, file: CommunityFile, target: { versionId: string; kind: CommunityKind; folder?: string }, operationId?: string) => {
       const task = registerTask(`下载 ${file.fileName ?? '资源'}`, 'download')
       const progressGuard = new ProgressEventGuard()
       let lastStage = ''
       const taskEmit = (e: ProgressEvent): void => {
         const normalized = progressGuard.normalize(e)
         if (!['error', 'done'].includes(normalized.stage)) lastStage = normalized.stage
-        emit({ ...normalized, taskId: task.id, taskTitle: task.title })
+        emit({ ...normalized, taskId: task.id, taskTitle: task.title, ...(typeof operationId === 'string' && /^[a-zA-Z0-9:_-]{1,96}$/.test(operationId) ? { operationId } : {}) })
       }
       try {
+        taskEmit({ stage: 'download', progress: 0, indeterminate: true, text: '准备下载资源…' })
         const r = await community.communityDownload(file, target, taskEmit, (done) => {
           const cancelled = done.error === '已取消'
           send(IPC_EVENT.taskDone, {

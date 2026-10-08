@@ -1,5 +1,6 @@
 import { cleanDesign } from '../../shared/visualDesign'
 import { normalizeVersionCategoryState } from '../../shared/versionCategories'
+import { storedUpdateMirrorUrls, validateUpdateMirrorUrls } from '../../shared/updateMirrors'
 import { defaultGameFolder, ensureDefaultGameFolder } from './defaultGameFolder'
 /**
  * 设置持久化：userData/settings.json
@@ -56,6 +57,7 @@ function defaults(): Settings {
     defaultIsolation: true,
     reduceMotion: false,
     uiWindowAutoFit: false,
+    updateMirrorUrls: [],
     msClientId: DEFAULT_MS_CLIENT_ID,
     theme: 'transparent',
     custom: structuredClone(DEFAULT_CUSTOM_THEME),
@@ -98,6 +100,7 @@ export function getSettings(): Settings {
       ...def,
       ...raw,
       uiWindowAutoFit: raw.uiWindowAutoFit === true,
+      updateMirrorUrls: storedUpdateMirrorUrls(raw.updateMirrorUrls),
       rememberGameWindowSize: raw.rememberGameWindowSize === true,
       ...normalizeVersionCategoryState(raw),
       visualDesign: cleanDesign(raw.visualDesign),
@@ -177,6 +180,7 @@ export function getSettings(): Settings {
 
 /** 合并 patch 并写盘，返回合并后的完整 Settings */
 export function saveSettings(patch: Partial<Settings>): Settings {
+  if (Object.prototype.hasOwnProperty.call(patch, 'updateMirrorUrls')) patch = { ...patch, updateMirrorUrls: validateUpdateMirrorUrls(patch.updateMirrorUrls) }
   if (Object.prototype.hasOwnProperty.call(patch, 'rememberGameWindowSize') && typeof patch.rememberGameWindowSize !== 'boolean') throw new Error('保存游戏窗口大小必须为开启或关闭')
   if (Object.prototype.hasOwnProperty.call(patch, 'uiWindowAutoFit') && typeof patch.uiWindowAutoFit !== 'boolean') throw new Error('UI窗口自适应必须为开启或关闭')
   const cur = getSettings()

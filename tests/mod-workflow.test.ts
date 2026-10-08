@@ -204,6 +204,11 @@ test('external runtime reuse follows exact coordinates, preserves existing bytes
 
 test('community component actually renders all-version defaults and explicit selection modes with no instance (not compile-only)', async () => {
   const bundle = await build({ entryPoints: ['src/renderer/src/views/CommunityView.vue'], bundle: true, write: false, format: 'cjs', platform: 'node', packages: 'external', alias: { '@shared': path.resolve('src/shared') }, plugins: [{ name: 'vue-unit', setup(b) {
+    // Both view-relative and root-relative API imports use this host fixture.
+    // Keep the real API exports; only Electron event subscriptions need a browser
+    // host, which this actual SSR-render test deliberately does not provide.
+    b.onResolve({ filter: /^\.\.?\/api$/ }, () => ({ path: 'renderer-api', namespace: 'ssr-host-fixture' }))
+    b.onLoad({ filter: /^renderer-api$/, namespace: 'ssr-host-fixture' }, () => ({ contents: 'export * from "./api.ts"; export const onProgress=()=>()=>{}; export const onTaskDone=()=>()=>{};', loader: 'ts', resolveDir: path.resolve('src/renderer/src') }))
     b.onLoad({ filter: /\.vue$/ }, args => {
       const { descriptor } = parse(fs.readFileSync(args.path, 'utf8'))
       return { contents: compileScript(descriptor, { id: args.path, inlineTemplate: true }).content, loader: 'ts', resolveDir: path.dirname(args.path) }

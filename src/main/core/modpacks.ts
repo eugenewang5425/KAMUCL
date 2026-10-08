@@ -195,7 +195,9 @@ async function openPackZip(filePath: string, signal?: AbortSignal, nested = fals
       const packs = entries.filter(entry => !entry.isDirectory && /\.mrpack$/i.test(entry.entryName))
       if (packs.length > 1) throw new Error('整合包包含多个 mrpack，请解压后选择要导入的那个 mrpack')
       if (packs.length === 1) {
-        if (packs[0].header.size > 512 * 1024 * 1024) throw new Error('整合包内层 mrpack 超过 512 MB，请解压后直接导入')
+        // The old 512 MiB limit guarded an in-memory nested ZIP copy. Nested
+        // archives now stream to an owned file; the outer/inner 32 GiB, ratio,
+        // path, CRC and entry-size limits still apply independently.
         if (fs.statSync(filePath).size <= 8 * 1024 * 1024 && packs[0].header.size <= 8 * 1024 * 1024) {
           const bytes = await packs[0].getData()
           await zip.close?.()

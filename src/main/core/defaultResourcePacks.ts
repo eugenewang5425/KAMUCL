@@ -5,6 +5,7 @@ import AdmZip from 'adm-zip'
 import { app } from 'electron'
 import type { DefaultResourcePack } from '../../shared/types'
 import { mcVersionAtLeast } from '../../shared/keybindings'
+import { prepareResourcePackArchive } from './resourcePackArchive'
 
 const root = () => path.join(app.getPath('userData'), 'default-resourcepacks')
 const manifest = () => path.join(root(), 'packs.json')
@@ -91,23 +92,13 @@ export function getDefaultResourcePacks(): DefaultResourcePack[] {
     return Array.isArray(packs) ? packs.filter(p => /^[a-f0-9]{64}$/.test(p?.id) && safePackName(p.name) && fs.existsSync(path.join(root(), p.id + '.zip'))).map(p => ({ ...p, enabled: p.enabled !== false })) : []
   } catch { return [] }
 }
-function packMetadata(data: Buffer, name: string): any {
-  let meta: any
-  try {
-    const entry = new AdmZip(data).getEntry('pack.mcmeta')
-    if (!entry || entry.header.size > 1024 * 1024) throw new Error('缺少有效的 pack.mcmeta')
-    meta = JSON.parse(entry.getData().toString('utf8').replace(/^\uFEFF/, ''))
-  } catch { throw new Error(`${name} 缺少有效或可读取的 pack.mcmeta`) }
-  if (!meta?.pack || typeof meta.pack !== 'object' || Array.isArray(meta.pack)) throw new Error(`${name} 不是有效材质包`)
-  return meta.pack
-}
 export function importDefaultResourcePacks(files: string[]): DefaultResourcePack[] {
   if (!Array.isArray(files) || !files.length) return getDefaultResourcePacks()
   // Validate the complete batch before changing the global defaults.
   const incoming = files.map(file => {
     if (typeof file !== 'string' || path.extname(file).toLowerCase() !== '.zip' || !fs.statSync(file).isFile()) throw new Error('请选择 ZIP 格式材质包')
     const data = fs.readFileSync(file)
-    packMetadata(data, path.basename(file))
+    prepareResourcePackArchive(data, path.basename(file))
     const original = path.basename(file).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
     // Leave room for the content-addressed prefix within Windows' filename limit.
     let shortName = ''
@@ -250,12 +241,13 @@ function updateInstancePacks(gameDir: string, mcVersion: string, clientJar: stri
   const data = packs.map(p => {
     const source = snapshot(path.join(root(), p.id + '.zip'))
     if (source === null || hash(source) !== p.id) throw new Error(`默认材质包缓存缺失或被修改，未覆盖：${p.name}`)
-    return { pack: p, source, meta: packMetadata(source, p.name), dest: path.join(gameDir, 'resourcepacks', managedName(p)) }
+    const prepared = prepareResourcePackArchive(source, p.name)
+    return { pack: p, source: prepared.data, payloadHash: hash(prepared.data), meta: prepared.metadata, dest: path.join(gameDir, 'resourcepacks', managedName(p)) }
   })
   // Check every destination before copying or updating either configuration file.
   for (const item of data) {
     const current = snapshot(item.dest)
-    if (current !== null && hash(current) !== item.pack.id) throw new Error(`默认材质包副本被修改，未覆盖：${item.pack.name}`)
+    if (current !== null && hash(current) !== item.payloadHash) throw new Error(`默认材质包副本被修改，未覆盖：${item.pack.name}`)
   }
   const targetFormat = readClientResourceFormat(clientJar)
   const incompatible = names.filter((name, i) => targetFormat !== null ? resourcePackIncompatible(data[i].meta, targetFormat)
@@ -266,21 +258,21 @@ function updateInstancePacks(gameDir: string, mcVersion: string, clientJar: stri
   for (const item of data) {
     const current = snapshot(item.dest)
     if (current !== null) {
-      if (hash(current) !== item.pack.id) throw new Error(`默认材质包副本被修改，未覆盖：${item.pack.name}`)
+      if (hash(current) !== item.payloadHash) throw new Error(`默认材质包副本被修改，未覆盖：${item.pack.name}`)
       continue
     }
     // Publish the verified snapshot without replacing a file created after preflight.
     const staged = path.join(path.dirname(item.dest), `.kamucl-pack-${crypto.randomUUID()}.tmp`)
     try {
       fs.writeFileSync(staged, item.source, { flag: 'wx' })
-      if (hash(fs.readFileSync(staged)) !== item.pack.id) throw new Error(`默认材质包复制校验失败：${item.pack.name}`)
+      if (hash(fs.readFileSync(staged)) !== item.payloadHash) throw new Error(`默认材质包复制校验失败：${item.pack.name}`)
       try { fs.linkSync(staged, item.dest) }
       catch (error) {
         if (!['EPERM', 'ENOSYS', 'EOPNOTSUPP', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
         fs.copyFileSync(staged, item.dest, fs.constants.COPYFILE_EXCL)
       }
     } finally { cleanTemp(staged) }
-    if (hash(fs.readFileSync(item.dest)) !== item.pack.id) throw new Error(`默认材质包复制校验失败：${item.pack.name}`)
+    if (hash(fs.readFileSync(item.dest)) !== item.payloadHash) throw new Error(`默认材质包复制校验失败：${item.pack.name}`)
   }
   unchanged(optionsFile, optionsBefore); unchanged(stateFile, stateBefore)
   const nextState: InstancePackState = { version: 2, managed }
