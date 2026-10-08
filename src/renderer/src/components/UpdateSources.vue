@@ -1,22 +1,29 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { MAX_CUSTOM_UPDATE_MIRRORS, UPDATE_MIRRORS, normalizeUpdateMirrorUrl, storedUpdateMirrorUrls } from '@shared/updateMirrors'
 import type { Settings } from '@shared/types'
 import { store, toast } from '../store'
 import { updateSettings } from '../settingsUpdates'
 import { errText } from '../api'
+import { restoreLostControlFocus } from '../controlFocus'
 
 const source = computed(() => store.settings?.updateSource ?? 'auto')
-const custom = computed(() => storedUpdateMirrorUrls(store.settings?.updateMirrorUrls))
+// Keep the visible rows until persistence completes: optimistic settings writes
+// must not destroy a focused remove button that rollback would recreate.
+const pendingRows = ref<{ custom: string[]; legacy: string } | null>(null)
+const custom = computed(() => pendingRows.value?.custom ?? storedUpdateMirrorUrls(store.settings?.updateMirrorUrls))
 const legacy = computed(() => normalizeUpdateMirrorUrl(store.settings?.updateMirrorUrl))
-const legacySeparate = computed(() => legacy.value && !custom.value.includes(legacy.value) && !UPDATE_MIRRORS.some(item => item.url === legacy.value) ? legacy.value : '')
+const legacySeparate = computed(() => pendingRows.value?.legacy ?? (legacy.value && !custom.value.includes(legacy.value) && !UPDATE_MIRRORS.some(item => item.url === legacy.value) ? legacy.value : ''))
 const input = ref(''), error = ref(''), busy = ref(false)
 async function save(patch: Partial<Settings>) {
   if (busy.value) return false
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  let failed = false
+  pendingRows.value = { custom: [...custom.value], legacy: legacySeparate.value }
   busy.value = true; error.value = ''
   try { await updateSettings(patch); return true }
-  catch (failure) { error.value = errText(failure); toast('保存更新来源失败：' + error.value, 'error'); return false }
-  finally { busy.value = false }
+  catch (failure) { failed = true; error.value = errText(failure); toast('保存更新来源失败：' + error.value, 'error'); return false }
+  finally { pendingRows.value = null; busy.value = false; if (failed) { await nextTick(); restoreLostControlFocus(previousFocus, '.update-sources') } }
 }
 async function add() {
   const url = normalizeUpdateMirrorUrl(input.value)

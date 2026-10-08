@@ -4,6 +4,7 @@ import { copyText } from '../api'
 import { store, exitEditMode, toast } from '../store'
 import { finishDesign, flushDesign, designDraft, designDirty, designSaveState, designStageReady, previewAppearance } from '../visualDesign'
 import { captureDesignNavigationScroll, restoreDesignNavigationScroll, type DesignNavigationScroll } from '../designNavigationScroll'
+import { restoreLostControlFocus } from '../controlFocus'
 
 /** Draft persistence, recovery and explicit apply/cancel actions. */
 export function useDesignSession() {
@@ -14,6 +15,8 @@ export function useDesignSession() {
   const status = computed(() => busy.value ? '正在保存…' : designDirty.value ? `${designSaveState.value || '修改已进入草稿'} · 尚未应用` : '当前已应用外观 · 修改会先进入草稿')
   async function close(action: 'apply' | 'keep' | 'discard') {
     if (busy.value) return
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    let failed = false
     busy.value = true
     try {
       await finishDesign(action); designStageReady.value = false; exitEditMode()
@@ -22,8 +25,11 @@ export function useDesignSession() {
       // Measure after that restoration, without changing focus or navigation.
       await new Promise<void>(resolve => requestAnimationFrame(() => { restoreDesignNavigationScroll(navigation); resolve() }))
     }
-    catch (error) { toast('保存失败，草稿已保留：' + String(error), 'error') }
-    finally { busy.value = false }
+    catch (error) { failed = true; toast('保存失败，草稿已保留：' + String(error), 'error') }
+    finally {
+      busy.value = false
+      if (failed) { await nextTick(); restoreLostControlFocus(previousFocus, '.design-workspace') }
+    }
   }
   function requestClose() { if (designDirty.value) exitOpen.value = true; else void close('discard') }
   async function exportTheme() {
