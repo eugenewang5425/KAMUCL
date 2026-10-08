@@ -23,6 +23,8 @@ permissions:
 jobs:
   package:
     if: github.event_name == 'workflow_dispatch' && inputs.resume_mac_arm64 == true
+    outputs:
+      version: ${{ steps.source-version.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +39,9 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      - name: Expose the actual checked-out package version
+        id: source-version
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_OUTPUT,'version='+require('./package.json').version+'\n')"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -312,7 +317,7 @@ jobs:
           if-no-files-found: error
 
   batch120:
-    if: inputs.verification_groups != 'parity'
+    if: inputs.verification_groups != 'parity' && needs.package.outputs.version == '1.1.20'
     needs: package
     strategy:
       fail-fast: false
@@ -342,6 +347,49 @@ jobs:
           path: |
             release/mac-batch120-proof-*
             release/mac-job-*
+          if-no-files-found: error
+
+  batch121-fixture-ui:
+    if: inputs.verification_groups != 'parity' && needs.package.outputs.version == '1.1.21'
+    needs: package
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-packages-arm64
+          path: release
+      - name: Validate strict version, provenance and native-runtime fixture QA contracts
+        run: node --test scripts/verify-mac-batch121-tests.cjs
+      - name: Fully build the production renderer from this exact checkout
+        run: |
+          node scripts/build-bridge.cjs
+          npm run build
+      - name: Native ARM64 Electron appearance and community fixture matrices
+        # This supplements the unchanged real APP/DMG/game/startup jobs.
+        # Any failing row makes the coordinator and this job fail; no acceptance is replaced.
+        run: node scripts/verify-mac-batch121.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-batch121-fixture-ui-arm64
+          path: |
+            out/mac-batch121-ui-*/receipt.json
+            out/mac-batch121-ui-*/*.log
+            out/appearance-121-ui-*/proof.json
+            out/appearance-121-ui-*/*.png
+            out/community-review-ui121-*/proof.json
+            out/community-review-ui121-*/*.png
           if-no-files-found: error
 
   resources:

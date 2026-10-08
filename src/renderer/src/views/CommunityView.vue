@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import ContentSkeleton from '../components/ContentSkeleton.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { communityDownload, communityFiles, communitySearch, errText, getManifest, getModTargets } from '../api'
+import { communityFiles, communitySearch, errText, getManifest, getModTargets } from '../api'
 import { store, toast, selectedInstance, displayVersionName as versionLabel } from '../store'
 import { instanceKey } from '@shared/modCompatibility'
 import { communityFileMatchesInstance, usesCommunityLoader } from '@shared/communityPolicy'
@@ -12,7 +12,8 @@ import { readCommunitySession, saveCommunitySession } from '../communitySession'
 import { initialCommunityQuery, initialCommunityVersionSelection, chooseCommunityInstance, usableCommunityInstance, type CommunityVersionSource } from '../communityVersionSelection'
 const previousSession = readCommunitySession()
 import MarqueeText from '../components/MarqueeText.vue'
-import ModInstallDialog from '../components/ModInstallDialog.vue'
+import CommunityDownloadQueue from '../components/CommunityDownloadQueue.vue'
+import { useCommunityDownloadQueue } from '../useCommunityDownloadQueue'
 import CommunityFavorites from '../components/CommunityFavorites.vue'
 import CommunityModDetails from '../components/CommunityModDetails.vue'
 import { favorites, favoriteBusy, loadFavorites, toggleProject } from '../modFavorites'
@@ -54,7 +55,7 @@ function openExternal(url: string) {
 }
 const currentInstance = selectedInstance
 const allTargets = ref<InstalledVersion[]>([])
-const modRequest = ref<{ target: InstalledVersion; input: { file: CommunityFile } } | null>(null)
+const downloadQueue = useCommunityDownloadQueue()
 const detailProject = ref<CommunityProjectReference | null>(null)
 const communityTab = ref<'browse' | 'favorites'>(previousSession?.tab ?? 'browse')
 const favoriteSearch = ref(previousSession?.favoriteSearch ?? '')
@@ -409,15 +410,14 @@ const modal = reactive({
   fileId: '',
   versionId: '',
   mcVersion: '',
-  loader: '' as LoaderName | '',
-  downloading: false
+  loader: '' as LoaderName | ''
 })
 
 const isModpack = computed(() => modal.kind === 'modpack')
 const selectedFile = computed(
   () => modal.files.find((f) => f.fileId === modal.fileId) ?? null
 )
-const targetOptions = computed(() => modal.kind === 'mod' ? allTargets.value.filter(v => selectedFile.value && communityFileMatchesInstance(selectedFile.value, v)) : store.installed)
+const targetOptions = computed(() => allTargets.value.filter(v => !v.failed && !v.incomplete && (modal.kind !== 'mod' || selectedFile.value && communityFileMatchesInstance(selectedFile.value, v))))
 watch(targetOptions, options => {
   if (!options.some(v => instanceKey(v) === modal.versionId)) {
     const selected = options.find(v => v.id === currentInstance.value?.id && v.folder === currentInstance.value?.folder) ?? options[0]
@@ -452,7 +452,6 @@ async function openDownload(item: CommunityProjectReference, kind: CommunityKind
   modal.versionId = currentInstance.value ? instanceKey(currentInstance.value) : ''
   modal.mcVersion = query.mcVersion
   modal.loader = usesCommunityLoader(kind) ? query.loader : ''
-  modal.downloading = false
   try {
     const scanned = await getModTargets()
     if (disposed || generation !== openGeneration || !modal.open) return
@@ -470,36 +469,21 @@ const canConfirm = computed(
   () =>
     !!selectedFile.value &&
     !modal.loadingFiles &&
-    !modal.downloading &&
-    (isModpack.value || !!modal.versionId)
+    (isModpack.value || targetOptions.value.some(v => instanceKey(v) === modal.versionId))
 )
 
-async function confirmDownload() {
+function confirmDownload() {
   const file = selectedFile.value
   if (!file || !canConfirm.value) return
-  const target = targetOptions.value.find(v => instanceKey(v) === modal.versionId)
-  if (modal.kind === 'mod') {
-    if (!target) return
-    modRequest.value = { target, input: { file } }
-    return
-  }
-  modal.downloading = true
+  const target = isModpack.value ? undefined : targetOptions.value.find(v => instanceKey(v) === modal.versionId)
   try {
-    const res = await communityDownload(file, {
-      versionId: target?.id ?? '',
-      kind: modal.kind,
-      folder: target?.folder
-    })
+    const folder = target?.folder || store.settings?.folders.find(folder => folder.isDefault)?.path || store.settings?.gameDir || ''
+    const { added } = downloadQueue.enqueue({ file, kind: modal.kind, target, folder })
     modal.open = false
-    if (modal.kind === 'modpack') {
-      toast(res || '已开始安装整合包', 'success')
-    } else {
-      toast(`下载完成，已保存到：${res}`, 'success')
-    }
+    fileGeneration++; openGeneration++
+    toast(added ? modal.kind === 'mod' ? '已加入社区队列，检测完成后请在队列确认前置与安装' : '已加入社区下载队列，可继续浏览资源' : '该文件已在目标实例的社区队列中', 'info')
   } catch (e) {
-    toast('下载失败：' + errText(e), 'error')
-  } finally {
-    modal.downloading = false
+    toast('加入队列失败：' + errText(e), 'error')
   }
 }
 
@@ -512,6 +496,7 @@ async function confirmDownload() {
       <h1 data-ui="CommunityView:5476a5545de6" class="page-title">社区资源</h1>
       <p data-ui="CommunityView:8ea54e89551b" class="page-sub">搜索并下载 Modrinth / CurseForge 上的 Mod、整合包、资源包、光影与数据包</p>
     </div>
+    <CommunityDownloadQueue />
 
     <div class="community-sections" role="tablist" aria-label="社区资源分区" @keydown="sectionKeyboard"><button class="community-section" role="tab" data-ui="community:browse" :tabindex="communityTab === 'browse' ? 0 : -1" :aria-selected="communityTab === 'browse'" :class="{ active: communityTab === 'browse' }" @click="communityTab = 'browse'">找资源</button><button class="community-section" role="tab" data-ui="community:favorites" :tabindex="communityTab === 'favorites' ? 0 : -1" :aria-selected="communityTab === 'favorites'" :class="{ active: communityTab === 'favorites' }" @click="communityTab = 'favorites'">已收藏 MOD <span>{{ favorites.length }}</span></button></div>
 
@@ -679,7 +664,7 @@ async function confirmDownload() {
     </template>
     <!-- 下载模态框 -->
     <Teleport to="body">
-      <div data-ui="CommunityView:ef88acc39749" v-if="modal.open" class="modal-mask" @pointerdown.self="!modal.downloading && (modal.open = false)">
+      <div data-ui="CommunityView:ef88acc39749" v-if="modal.open" class="modal-mask" @pointerdown.self="modal.open = false">
         <div data-ui="CommunityView:6904c547ed30" class="modal download-modal">
           <h3 data-ui="CommunityView:7b81ed690844" class="modal-title"><MarqueeText :text="'下载 ' + modal.item?.title"/></h3>
           <div data-ui="CommunityView:a84b1e456827" v-if="modal.item" class="modal-links">
@@ -733,16 +718,14 @@ async function confirmDownload() {
           <p data-ui="CommunityView:a8e08b82f315" v-else class="muted pack-tip">整合包将下载后自动创建独立实例并安装</p>
 
           <div data-ui="CommunityView:2356b94bbc0d" class="modal-actions">
-            <button data-ui="CommunityView:989d28842ec5" class="btn btn-ghost" :disabled="modal.downloading" @click="modal.open = false">取消</button>
+            <button data-ui="CommunityView:989d28842ec5" class="btn btn-ghost" @click="modal.open = false">取消</button>
             <button data-ui="CommunityView:cade5c4fc83a" class="btn btn-gold" :disabled="!canConfirm" @click="confirmDownload">
-              <span data-ui="CommunityView:d3c64175bb8e" v-if="modal.downloading" class="spin"></span>
-              {{ modal.downloading ? '下载中…' : '确认下载' }}
+              {{ modal.kind === 'mod' ? '加入队列并检测' : '确认下载' }}
             </button>
           </div>
         </div>
       </div>
     </Teleport>
-    <ModInstallDialog v-if="modRequest" :target="modRequest.target" :input="modRequest.input" @close="modRequest = null" @installed="modRequest = null; modal.open = false"/>
     <CommunityModDetails v-if="detailProject" :reference="detailProject" @close="detailProject = null" @download="detailProject = null; openDownload($event, 'mod')" />
   </div>
 </template>

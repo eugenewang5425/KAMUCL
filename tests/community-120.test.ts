@@ -301,12 +301,12 @@ async function mountedCommunity() {
   const descriptor = parse(fs.readFileSync('src/renderer/src/views/CommunityView.vue', 'utf8')).descriptor
   const script = compileScript(descriptor, { id: 'community-120-real-setup' }).content
   const requests: Array<{ query: any; resolve: (v: any) => void }> = [], fileRequests: any[] = [], downloads: any[] = [], state: any = {}
-  const fixture = { state, store: reactive({ installed: [target], settings: { theme: 'black-orange' }, searchKeyword: '' }), selected: ref(target), requests, fileRequests, downloads }
+  const fixture = { state, store: reactive({ installed: [target], settings: { theme: 'black-orange', folders:[{path:'fixture/default-download',isDefault:true}],gameDir:'fixture/registered' }, searchKeyword: '' }), selected: ref(target), requests, fileRequests, downloads }
   const code = (await build({ stdin: { contents: script, loader: 'ts', resolveDir: path.resolve('src/renderer/src/views') }, bundle: true, write: false, platform: 'node', format: 'cjs', packages: 'external', logLevel: 'silent', plugins: [{ name: 'scoped-community-transport-and-child-host-fixtures', setup(b) {
     b.onResolve({ filter: /\.vue$/ }, () => ({ path: 'child-host', namespace: 'fixture' }))
-    b.onResolve({ filter: /^\.\.\/(api|store|modFavorites)$/ }, args => ({ path: args.path.split('/').at(-1)!, namespace: 'fixture' }))
+    b.onResolve({ filter: /^\.\.?\/(api|store|modFavorites)$/ }, args => ({ path: args.path.split('/').at(-1)!, namespace: 'fixture' }))
     b.onResolve({ filter: /^@shared\// }, args => ({ path: path.resolve('src/shared', args.path.slice('@shared/'.length) + '.ts') }))
-    b.onLoad({ filter: /.*/, namespace: 'fixture' }, args => ({ loader: 'ts', contents: args.path === 'api' ? `const f=globalThis.fixture; export const communitySearch=q=>new Promise(resolve=>f.requests.push({query:{...q},resolve})); export const communityFiles=(...a)=>{f.fileRequests.push(a);return Promise.resolve([])}; export const getManifest=()=>Promise.resolve([{id:'1.21.1',type:'release'},{id:'1.20.1',type:'release'}]); export const getModTargets=()=>Promise.resolve({versions:f.store.installed,errors:[]}); export const errText=e=>String(e); export const communityDownload=(file,target)=>{f.downloads.push({file,target});return Promise.resolve('synthetic IPC result, no downloaded file')};`
+    b.onLoad({ filter: /.*/, namespace: 'fixture' }, args => ({ loader: 'ts', contents: args.path === 'api' ? `const f=globalThis.fixture; export const communitySearch=q=>new Promise(resolve=>f.requests.push({query:{...q},resolve})); export const communityFiles=(...a)=>{f.fileRequests.push(a);return Promise.resolve([])}; export const getManifest=()=>Promise.resolve([{id:'1.21.1',type:'release'},{id:'1.20.1',type:'release'}]); export const getModTargets=()=>Promise.resolve({versions:f.store.installed,errors:[]}); export const errText=e=>String(e); export const communityDownload=(file,target)=>{f.downloads.push({file,target});return Promise.resolve('synthetic IPC result, no downloaded file')}; export const prepareModInstall=(target,input)=>Promise.resolve({id:'synthetic-plan',target,files:[{fileName:input.file.fileName,dependency:false}],missing:[],warnings:[]}); export const commitModInstall=()=>Promise.resolve('synthetic-commit'); export const discardModInstall=()=>Promise.resolve(); export const cancelTask=()=>Promise.resolve(); export const onProgress=()=>()=>{}; export const onTaskDone=()=>()=>{};`
       : args.path === 'store' ? `const f=globalThis.fixture; export const store=f.store,selectedInstance=f.selected;export const toast=()=>{};export const displayVersionName=v=>v.id;`
       : args.path === 'modFavorites' ? `export const favorites=[],favoriteBusy=new Set(); export const loadFavorites=async()=>{};export const toggleProject=()=>{};`
       : 'export default {}' }))
@@ -357,6 +357,7 @@ test('actual compiled resource download keeps the exact folder for same-named ta
   await h.resolveLast()
   const second = { ...target, folder: 'fixture/other-registered-folder' }
   h.fixture.store.installed.push(second)
+  s.allTargets.value = [...h.fixture.store.installed]
   const selected = h.fixture.selected.value, originalQuery = { ...s.query }
   const file = { source: 'modrinth', projectId: 'synthetic', fileId: 'resource-file', fileName: 'resource.zip', url: 'https://fixture.invalid/resource.zip', gameVersions: ['1.20.1'], loaders: [] }
   s.modal.open = true; s.modal.kind = 'resourcepack'; s.modal.files = [file]; s.modal.fileId = file.fileId
@@ -371,7 +372,7 @@ test('actual compiled resource download keeps the exact folder for same-named ta
   app.unmount()
 })
 
-test('actual compiled MOD confirmation uses the exact selected instance without changing the launcher selection', async () => {
+test('actual compiled MOD queue uses the exact selected instance without changing the launcher selection', async () => {
   const h = await mountedCommunity(), app = await h.mount(), s = h.fixture.state.current
   await h.resolveLast()
   const second = { ...target, folder: 'fixture/other-mod-folder' }
@@ -381,8 +382,23 @@ test('actual compiled MOD confirmation uses the exact selected instance without 
   await h.vue.nextTick()
   const selected = h.fixture.selected.value, originalQuery = { ...s.query }
   await s.confirmDownload()
-  assert.equal(s.modRequest.value.target.folder, second.folder); assert.equal(s.modRequest.value.target.id, second.id)
+  const queued = s.downloadQueue.items[0]
+  assert.equal(queued.target.folder, second.folder); assert.equal(queued.target.id, second.id)
   assert.equal(h.fixture.selected.value, selected); assert.deepEqual({ ...s.query }, originalQuery)
-  assert.equal(h.fixture.downloads.length, 0, 'MOD dependencies remain handled by the existing install dialog')
+  assert.equal(h.fixture.downloads.length, 0, 'MOD dependencies remain handled by the prepared transaction, only after explicit confirmation')
+  assert.equal(s.modal.open, false, 'background preparation releases the browser immediately')
+  app.unmount()
+})
+
+test('actual compiled pack queue freezes the accepted default, and stale incompatible target selections cannot be confirmed', async () => {
+  const h = await mountedCommunity(), app = await h.mount(), s = h.fixture.state.current
+  await h.resolveLast()
+  const file = { source:'modrinth',projectId:'pack',fileId:'pack',fileName:'pack.mrpack',url:'https://fixture.invalid/pack',gameVersions:['1.21.1'],loaders:['fabric'] }
+  s.allTargets.value = [target]; s.modal.open = true; s.modal.kind = 'modpack'; s.modal.files = [file]; s.modal.fileId = file.fileId
+  s.modal.loadingFiles = false; s.modal.versionId = instanceKey(target)
+  await s.confirmDownload()
+  assert.deepEqual(h.fixture.downloads[0].target,{versionId:'',kind:'modpack',folder:'fixture/default-download'})
+  s.modal.open = true; s.modal.kind = 'mod'; s.modal.fileId = file.fileId
+  await h.vue.nextTick(); assert.equal(s.canConfirm.value,false,'a remembered 1.20.1 target cannot accept an incompatible 1.21.1 file')
   app.unmount()
 })

@@ -438,6 +438,8 @@ export interface Settings {
   updateSource?: 'auto' | 'direct' | 'mirror'
   /** 自定义镜像前缀（拼接在 GitHub 文件 URL 前，如 https://ghproxy.net/） */
   updateMirrorUrl?: string
+  /** Additional update mirrors; the old singular field remains readable. */
+  updateMirrorUrls?: string[]
   /** 内测群号覆盖（免打包临时改；默认取 shared/branding.ts 的 QQ_GROUP_NUMBER） */
   qqGroupNumber?: string
   /** CurseForge 官方 API Key（console.curseforge.com 免费申请）；留空走 MCIM 镜像兜底 */

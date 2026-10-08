@@ -4,7 +4,7 @@ import os from 'node:os'
 import crypto from 'node:crypto'
 import type { CommunityFile, CommunitySource, InstalledVersion, ModInfo, ModInstallPlan, ModRequirement, ProgressEvent } from '../../shared/types'
 import { communityFileMatchesInstance } from '../../shared/communityPolicy'
-import { matchesVersionRange, modMatchesInstance, normalizeLoader } from '../../shared/modCompatibility'
+import { matchesVersionRange, modMatchesInstance, modMismatchReasons, normalizeLoader } from '../../shared/modCompatibility'
 import { parseModFile } from './modinfo'
 import { communityExactFile, communityFiles, communitySearch } from './community'
 import { downloadAll } from './download'
@@ -93,7 +93,7 @@ export async function prepareModInstall(target: InstalledVersion, input: { paths
       signal?.throwIfAborted()
       if (!input.file.source || !input.file.projectId) throw new Error('缺少项目来源，请重新打开下载页')
       const file = await repository.exact(input.file.source, input.file.projectId, input.file.fileId)
-      if (!communityFileMatchesInstance(file, target)) throw new Error('所选 MOD 文件与目标实例不兼容')
+      if (!communityFileMatchesInstance(file, target)) throw new Error(`所选 MOD 文件不支持目标 MC ${target.mcVersion} / ${target.loader || '纯净版'}；文件声明 MC ${file.gameVersions.join(' / ') || '未知'} / ${file.loaders.join(' / ') || '未知'}`)
       const dest = path.join(directory, path.basename(file.fileName))
       emit({ stage: 'download', progress: 0, overall: 0, indeterminate: true, text: '读取所选 MOD，解析内置前置要求…' })
       await downloadAll([{ url:file.url, dest, sha1:file.sha1, size:file.size || undefined }], (_d,_t,speed,detail) => emit({stage:'download', progress:detail.fraction ?? 0, overall:(detail.fraction ?? 0) * 0.85, indeterminate:detail.indeterminate, text:`下载所选 MOD：${file.fileName}`, speed, bytesDone:detail.bytesDone, bytesTotal:detail.bytesTotal ?? undefined, etaSeconds:detail.etaSeconds ?? undefined}), 8, 'official', signal)
@@ -109,7 +109,7 @@ export async function prepareModInstall(target: InstalledVersion, input: { paths
     emit({ stage: 'mod-prepare', progress: 0, overall: input.file ? 0.85 : 0, indeterminate: true, text: 'MOD 已准备，正在检测兼容性和必要前置（尚未安装）…' })
     if (!plan.roots.length) throw new Error('没有待安装的 MOD')
     const mods = plan.roots.map(parseModFile)
-    for (const mod of mods) if (!modMatchesInstance(mod, target)) throw new Error(`${mod.name || mod.fileName}：${mod.error || '与目标实例的 MC / Loader 版本不兼容'}`)
+    for (const mod of mods) if (!modMatchesInstance(mod, target)) throw new Error(`${mod.name || mod.fileName}：${modMismatchReasons(mod, target).join('；')}`)
     const installed = installedMods(target)
     const missing = missingRequirements(mods, target, [...installed, ...mods])
     const graph = await dependencyGraph(roots, target, repository, plan.pinnedFiles)
@@ -168,7 +168,7 @@ export async function executeModPlan(id: string, includeDependencies: boolean, r
     for (const file of dependencies) {
       signal?.throwIfAborted()
       const mod = parseModFile(file.dest)
-      if (!modMatchesInstance(mod, target)) throw new Error(`${file.fileName} 的 JAR 元数据不兼容目标实例：${mod.error ?? ''}`)
+      if (!modMatchesInstance(mod, target)) throw new Error(`${file.fileName} 的 JAR 元数据不兼容目标实例：${modMismatchReasons(mod, target).join('；')}`)
       const pinned = plan.pinnedFiles.get(`${file.source}:${file.fileId}`)
       if (pinned) pinnedPaths.set(mod.filePath, pinned)
       // A pinned repository edge requires that exact file. An existing provider
